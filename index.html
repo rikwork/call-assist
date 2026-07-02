@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zoom Sales Copilot - Real-Time Hints</title>
+    <!-- Outfit Font for clean, premium sans-serif typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-base: #060913;
+            --bg-panel: rgba(15, 23, 42, 0.45);
+            --bg-card: rgba(30, 41, 59, 0.5);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(255, 255, 255, 0.15);
+            
+            /* Curated accent palette (NO purple/violet) */
+            --accent-cyan: #00f2fe;
+            --accent-blue: #2563eb;
+            --accent-blue-glow: rgba(37, 99, 235, 0.35);
+            --accent-emerald: #10b981;
+            --accent-emerald-glow: rgba(16, 185, 129, 0.3);
+            --accent-gold: #f59e0b;
+            --accent-gold-glow: rgba(245, 158, 11, 0.3);
+            --accent-rose: #f43f5e;
+            --accent-rose-glow: rgba(244, 63, 94, 0.35);
+            
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            
+            --shadow-glow: 0 0 20px rgba(0, 242, 254, 0.15);
+            --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 24px;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(37, 99, 235, 0.1) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 40%);
+        }
+
+        /* Container Layout */
+        .app-container {
+            width: 100%;
+            max-width: 1200px;
+            height: 800px;
+            display: grid;
+            grid-template-columns: 450px 1fr;
+            gap: 24px;
+            background: var(--bg-panel);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            padding: 24px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            transition: var(--transition-smooth);
+        }
+
+        /* Panel Layouts */
+        .panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 16px;
+        }
+
+        .panel-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 6px 12px;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--accent-rose);
+            box-shadow: 0 0 8px var(--accent-rose-glow);
+        }
+
+        .status-dot.connected {
+            background-color: var(--accent-emerald);
+            box-shadow: 0 0 8px var(--accent-emerald-glow);
+            animation: pulse-dot 2s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.7; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        /* Left Panel: Transcript Feed */
+        .transcript-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            padding: 16px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            scroll-behavior: smooth;
+        }
+
+        /* Custom Scrollbar */
+        .transcript-container::-webkit-scrollbar,
+        .hints-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        .transcript-container::-webkit-scrollbar-thumb,
+        .hints-container::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 99px;
+        }
+
+        .message-bubble {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 85%;
+            animation: slide-in 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+            opacity: 0;
+            transform: translateY(10px);
+        }
+
+        @keyframes slide-in {
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-bubble.representative {
+            align-self: flex-start;
+        }
+
+        .message-bubble.customer {
+            align-self: flex-end;
+            align-items: flex-end;
+        }
+
+        .message-sender {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .message-text {
+            padding: 12px 16px;
+            border-radius: 16px;
+            font-size: 0.925rem;
+            line-height: 1.45;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .message-bubble.representative .message-text {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-top-left-radius: 4px;
+            color: var(--text-primary);
+        }
+
+        .message-bubble.customer .message-text {
+            background: rgba(37, 99, 235, 0.15);
+            border: 1px solid rgba(37, 99, 235, 0.3);
+            border-top-right-radius: 4px;
+            color: var(--text-primary);
+        }
+
+        /* Right Panel: Copilot Hints & Predictions */
+        .hints-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        /* Active Waveform Simulation */
+        .wave-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            height: 20px;
+        }
+
+        .wave-bar {
+            width: 2px;
+            height: 4px;
+            background-color: var(--text-muted);
+            border-radius: 1px;
+            transition: var(--transition-smooth);
+        }
+
+        .status-badge.connected .wave-bar {
+            background-color: var(--accent-emerald);
+            animation: pulse-wave 1.2s infinite ease-in-out alternate;
+        }
+
+        .status-badge.connected .wave-bar:nth-child(2) { animation-delay: 0.15s; }
+        .status-badge.connected .wave-bar:nth-child(3) { animation-delay: 0.3s; }
+        .status-badge.connected .wave-bar:nth-child(4) { animation-delay: 0.45s; }
+        .status-badge.connected .wave-bar:nth-child(5) { animation-delay: 0.6s; }
+
+        @keyframes pulse-wave {
+            0% { height: 4px; }
+            100% { height: 16px; }
+        }
+
+        /* Cards & Blocks styling */
+        .hint-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            animation: slide-up-fade 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            position: relative;
+            overflow: hidden;
+        }
+
+        @keyframes slide-up-fade {
+            from { opacity: 0; transform: translateY(15px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .hint-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: var(--accent-blue);
+        }
+
+        /* SPIN Stage styles */
+        .stage-badge-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .stage-badge {
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .stage-badge.situation {
+            background: rgba(37, 99, 235, 0.15);
+            border-color: rgba(37, 99, 235, 0.3);
+            color: #60a5fa;
+        }
+
+        .stage-badge.problem {
+            background: rgba(245, 158, 11, 0.15);
+            border-color: rgba(245, 158, 11, 0.3);
+            color: #fbbf24;
+        }
+
+        .stage-badge.implication {
+            background: rgba(16, 185, 129, 0.15);
+            border-color: rgba(16, 185, 129, 0.3);
+            color: #34d399;
+        }
+
+        .stage-badge.need-payoff {
+            background: rgba(0, 242, 254, 0.15);
+            border-color: rgba(0, 242, 254, 0.3);
+            color: #22d3ee;
+        }
+
+        .stage-badge.objection {
+            background: rgba(244, 63, 94, 0.15);
+            border-color: rgba(244, 63, 94, 0.3);
+            color: #fb7185;
+            animation: objection-pulse 1.5s infinite alternate;
+        }
+
+        @keyframes objection-pulse {
+            0% { box-shadow: 0 0 0 0px rgba(244, 63, 94, 0.2); }
+            100% { box-shadow: 0 0 12px 2px rgba(244, 63, 94, 0.35); }
+        }
+
+        .confidence-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .confidence-value {
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        /* Objections Section */
+        .objections-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 4px;
+        }
+
+        .objection-pill {
+            background: rgba(244, 63, 94, 0.08);
+            border: 1px solid rgba(244, 63, 94, 0.25);
+            color: #fda4af;
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* Script Recommendation */
+        .script-box {
+            background: rgba(0, 0, 0, 0.15);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            position: relative;
+        }
+
+        .script-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .script-content {
+            font-size: 1rem;
+            line-height: 1.5;
+            color: var(--text-primary);
+            font-style: italic;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 14px;
+            right: 14px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: var(--transition-smooth);
+        }
+
+        .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-primary);
+            border-color: var(--border-hover);
+        }
+
+        /* Questions Section */
+        .questions-box {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .questions-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .question-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            padding: 14px;
+            border-radius: 12px;
+            transition: var(--transition-smooth);
+            cursor: pointer;
+        }
+
+        .question-item:hover {
+            background: rgba(255, 255, 255, 0.04);
+            border-color: var(--border-hover);
+            transform: translateX(4px);
+        }
+
+        .question-num {
+            background: rgba(37, 99, 235, 0.15);
+            color: #60a5fa;
+            width: 22px;
+            height: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            font-size: 0.75rem;
+            font-weight: 600;
+            border: 1px solid rgba(37, 99, 235, 0.3);
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .question-text {
+            font-size: 0.95rem;
+            line-height: 1.4;
+            color: var(--text-primary);
+        }
+
+        /* Welcome screen when waiting */
+        .welcome-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            text-align: center;
+            padding: 40px;
+            background: rgba(255, 255, 255, 0.01);
+            border: 1px dashed var(--border-color);
+            border-radius: 20px;
+            color: var(--text-secondary);
+        }
+
+        .welcome-icon {
+            font-size: 3rem;
+            margin-bottom: 16px;
+            animation: bounce-icon 2s infinite ease-in-out;
+        }
+
+        @keyframes bounce-icon {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-8px); }
+        }
+
+        .welcome-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .welcome-text {
+            font-size: 0.9rem;
+            max-width: 320px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="app-container">
+        <!-- Left Column: Audio and Transcription -->
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">
+                    <span>🎙️ Лента разговора</span>
+                </div>
+                <div class="status-badge" id="conn-badge">
+                    <div class="status-dot" id="status-dot"></div>
+                    <span id="status-text">Отключено</span>
+                </div>
+            </div>
+            
+            <div class="transcript-container" id="transcript-feed">
+                <!-- Dialogue will load here dynamically -->
+                <div class="welcome-card" style="border: none; background: transparent; padding: 20px;">
+                    <div class="welcome-icon">💬</div>
+                    <div class="welcome-title">Диалог не начат</div>
+                    <div class="welcome-text">Начните трансляцию аудио для вывода реплик.</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Right Column: AI Sales Suggestions -->
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">
+                    <span>💡 Подсказки ИИ-копилота</span>
+                </div>
+                <div class="status-badge" id="thinking-badge" style="display: none;">
+                    <div class="wave-wrapper">
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                        <div class="wave-bar"></div>
+                    </div>
+                    <span>Анализирую речь...</span>
+                </div>
+            </div>
+            
+            <div class="hints-container" id="hints-feed">
+                <div class="welcome-card" id="welcome-hint">
+                    <div class="welcome-icon">🧠</div>
+                    <div class="welcome-title">Рекомендации в реальном времени</div>
+                    <div class="welcome-text">По мере ведения диалога ИИ будет анализировать ответы клиента и выводить здесь вопросы по SPIN и готовые скрипты.</div>
+                </div>
+                
+                <!-- Main hint display card (Hidden by default) -->
+                <div class="hint-card" id="active-hint-card" style="display: none;">
+                    <div class="stage-badge-container">
+                        <div class="stage-badge" id="hint-stage">Ситуация</div>
+                        <div class="confidence-label">
+                            Точность: <span class="confidence-value" id="hint-confidence">98%</span>
+                        </div>
+                    </div>
+                    
+                    <div id="objections-container" style="display: none;">
+                        <div class="questions-title" style="margin-bottom: 6px;">Обнаружены возражения</div>
+                        <div class="objections-list" id="objections-pills">
+                            <!-- Objection pills loaded here -->
+                        </div>
+                    </div>
+                    
+                    <div class="script-box">
+                        <div class="script-title">
+                            <span>Рекомендуемый речевой модуль</span>
+                        </div>
+                        <button class="copy-btn" onclick="copyScript()">Копировать</button>
+                        <div class="script-content" id="hint-script">
+                            "Работа с таблицами Excel и ручной ввод данных — классическое узкое место. Сколько времени вы тратите на это?"
+                        </div>
+                    </div>
+                    
+                    <div class="questions-box">
+                        <div class="questions-title">Рекомендуемые вопросы по SPIN</div>
+                        <div id="questions-list">
+                            <!-- Question items loaded here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Extract session_id from URL or generate a random one to support concurrent tabs
+        const urlParams = new URLSearchParams(window.location.search);
+        let sessionId = urlParams.get('session_id');
+        if (!sessionId) {
+            sessionId = 'session_' + Math.random().toString(36).substring(2, 9);
+            window.history.replaceState(null, '', `?session_id=${sessionId}`);
+        }
+
+        let ws;
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const connBadge = document.getElementById('conn-badge');
+        const transcriptFeed = document.getElementById('transcript-feed');
+        const thinkingBadge = document.getElementById('thinking-badge');
+        
+        const welcomeHint = document.getElementById('welcome-hint');
+        const activeHintCard = document.getElementById('active-hint-card');
+        const hintStage = document.getElementById('hint-stage');
+        const hintConfidence = document.getElementById('hint-confidence');
+        const objectionsContainer = document.getElementById('objections-container');
+        const objectionsPills = document.getElementById('objections-pills');
+        const hintScript = document.getElementById('hint-script');
+        const questionsList = document.getElementById('questions-list');
+
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUri = `${protocol}//${window.location.host}/ws/${sessionId}`;
+            
+            console.log(`Connecting UI to WebSocket: ${wsUri}`);
+            ws = new WebSocket(wsUri);
+            
+            ws.onopen = () => {
+                statusDot.className = 'status-dot connected';
+                statusText.innerText = 'В эфире';
+                connBadge.className = 'status-badge connected';
+            };
+            
+            ws.onclose = () => {
+                statusDot.className = 'status-dot';
+                statusText.innerText = 'Отключено';
+                connBadge.className = 'status-badge';
+                // Retry connection in 3 seconds
+                setTimeout(connect, 3000);
+            };
+            
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                
+                if (message.type === 'status') {
+                    console.log("Status update from server:", message.message);
+                }
+                
+                if (message.type === 'transcript_update') {
+                    addTranscriptLine(message.line);
+                    // Show processing animation
+                    thinkingBadge.style.display = 'flex';
+                }
+                
+                if (message.type === 'hint') {
+                    // Hide thinking badge
+                    thinkingBadge.style.display = 'none';
+                    updateHint(message.data);
+                }
+            };
+        }
+
+        function addTranscriptLine(line) {
+            // Remove welcome screen if it's there
+            const welcome = transcriptFeed.querySelector('.welcome-card');
+            if (welcome) welcome.remove();
+            
+            const parts = line.split(': ');
+            const sender = parts[0] || 'Спикер';
+            const text = parts.slice(1).join(': ') || '';
+            
+            const bubble = document.createElement('div');
+            const roleClass = sender.toLowerCase().includes('мен') ? 'representative' : 'customer';
+            bubble.className = `message-bubble ${roleClass}`;
+            
+            // Build elements explicitly to prevent XSS
+            const senderDiv = document.createElement('div');
+            senderDiv.className = 'message-sender';
+            senderDiv.textContent = sender;
+            
+            const textDiv = document.createElement('div');
+            textDiv.className = 'message-text';
+            textDiv.textContent = text;
+            
+            bubble.appendChild(senderDiv);
+            bubble.appendChild(textDiv);
+            
+            transcriptFeed.appendChild(bubble);
+            transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+        }
+
+        function updateHint(data) {
+            welcomeHint.style.display = 'none';
+            activeHintCard.style.display = 'flex';
+            
+            // Set SPIN stage class (mapped to Russian stages)
+            const stage = data.stage || 'Ситуация';
+            hintStage.textContent = stage;
+            
+            // Reset classes
+            hintStage.className = 'stage-badge';
+            if (stage.includes('Ситуация')) hintStage.classList.add('situation');
+            else if (stage.includes('Проблема')) hintStage.classList.add('problem');
+            else if (stage.includes('Извлечение')) hintStage.classList.add('implication');
+            else if (stage.includes('Направляющие')) hintStage.classList.add('need-payoff');
+            else if (stage.includes('возражений')) hintStage.classList.add('objection');
+            
+            // Confidence
+            const conf = Math.round((data.confidence || 1.0) * 100);
+            hintConfidence.textContent = `${conf}%`;
+            
+            // Handle objections lists with secure DOM creation
+            const objections = data.detected_objections || [];
+            objectionsPills.innerHTML = '';
+            if (objections.length > 0) {
+                objectionsContainer.style.display = 'block';
+                objections.forEach(obj => {
+                    const pill = document.createElement('div');
+                    pill.className = 'objection-pill';
+                    pill.textContent = `⚠️ ${obj}`;
+                    objectionsPills.appendChild(pill);
+                });
+            } else {
+                objectionsContainer.style.display = 'none';
+            }
+            
+            // Script recommendations using textContent
+            const scripts = data.suggested_scripts || [];
+            hintScript.textContent = scripts.length > 0 ? `"${scripts[0]}"` : '"Продолжайте диалог для накопления контекста..."';
+            
+            // Next questions lists explicitly using DOM Nodes (XSS protection)
+            const questions = data.next_questions || [];
+            questionsList.innerHTML = '';
+            if (questions.length > 0) {
+                questions.forEach((q, idx) => {
+                    const qItem = document.createElement('div');
+                    qItem.className = 'question-item';
+                    qItem.onclick = () => copyText(q);
+                    
+                    const qNum = document.createElement('div');
+                    qNum.className = 'question-num';
+                    qNum.textContent = idx + 1;
+                    
+                    const qText = document.createElement('div');
+                    qText.className = 'question-text';
+                    qText.textContent = q;
+                    
+                    qItem.appendChild(qNum);
+                    qItem.appendChild(qText);
+                    questionsList.appendChild(qItem);
+                });
+            } else {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.className = 'question-text';
+                emptyDiv.style.color = 'var(--text-muted)';
+                emptyDiv.style.fontStyle = 'italic';
+                emptyDiv.textContent = 'Конкретных вопросов пока не предложено.';
+                questionsList.appendChild(emptyDiv);
+            }
+        }
+
+        function copyScript() {
+            const text = hintScript.textContent.replace(/"/g, '');
+            copyText(text);
+        }
+
+        function copyText(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Скопировано в буфер обмена!');
+            }).catch(err => {
+                console.error('Could not copy text: ', err);
+            });
+        }
+
+        // Connect on page load
+        connect();
+    </script>
+</body>
+</html>
