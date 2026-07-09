@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Google Antigravity SDK Configuration
-MODEL_NAME = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.5-flash")
+MODEL_NAME = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.1-flash-lite")
 TEMPERATURE = 0.2
 MOCK_MODE = os.environ.get("MOCK_AGENT", "False").lower() in ("true", "1", "t", "y", "yes")
 
