@@ -16,7 +16,10 @@ for (let i = 0; i < args.length; i++) {
     }
 }
 
-const zoomUrl = params.url;
+let zoomUrl = params.url;
+if (zoomUrl && zoomUrl.includes('/j/')) {
+    zoomUrl = zoomUrl.replace('/j/', '/wc/join/');
+}
 const sessionId = params.session || 'default_session';
 const backendHost = params.backend || 'localhost:8000';
 
@@ -75,7 +78,7 @@ async function run() {
     
     try {
         console.log(`[Zoom Bot] Navigating to Zoom URL...`);
-        await page.goto(zoomUrl);
+        await page.goto(zoomUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
 
         // Bypassing landing page to open web client
         // Look for "Join from your browser" link
@@ -96,7 +99,7 @@ async function run() {
         await page.fill(nameInputSelector, 'ИИ-Ассистент');
         
         console.log('[Zoom Bot] Clicking Join Button...');
-        const joinBtnSelector = 'button.wc-btn-join, #joinBtn, button:has-text("Join")';
+        const joinBtnSelector = 'button.wc-btn-join, #joinBtn, button:has-text("Join"), button:has-text("Войти"), button:has-text("Присоединиться"), button.preview-join-button';
         await page.waitForSelector(joinBtnSelector, { timeout: 5000 });
         await page.click(joinBtnSelector);
 
@@ -217,6 +220,13 @@ async function run() {
 
     } catch (error) {
         console.error('[Zoom Bot] Error during automation:', error);
+        try {
+            const screenshotPath = path.resolve(__dirname, 'bot_error.png');
+            await page.screenshot({ path: screenshotPath });
+            console.log(`[Zoom Bot] Saved error screenshot to ${screenshotPath}`);
+        } catch (e) {
+            console.error('[Zoom Bot] Failed to capture error screenshot:', e);
+        }
     } finally {
         if (parecProcess) parecProcess.kill();
         await browser.close();
