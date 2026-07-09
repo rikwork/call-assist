@@ -72,7 +72,17 @@ async def main():
             
             # Send both prompt and audio bytes to the agent
             response = await agent.chat([prompt, audio_part])
-            print("Received response! Parsing structured JSON data...")
+            print("\nReceived response! Reading raw stream in real-time:")
+            print("="*50)
+            
+            async for chunk in response:
+                if hasattr(chunk, 'text') and chunk.text:
+                    print(chunk.text, end="", flush=True)
+                else:
+                    print(f"\n[Non-text chunk]: {chunk}")
+            
+            print("\n" + "="*50)
+            print("Finished reading stream. Getting last structured output...")
             
             data = await response.structured_output()
             end_time = time.time()
