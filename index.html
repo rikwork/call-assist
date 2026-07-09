@@ -698,6 +698,10 @@
         }
 
         function updateHint(data) {
+            // Do not update the hint card for Representative (Manager) turns, keeping Customer's hints active.
+            if (data.speaker_role === 'Representative') {
+                return;
+            }
             welcomeHint.style.display = 'none';
             activeHintCard.style.display = 'flex';
             

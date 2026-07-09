@@ -1,0 +1,11 @@
+{
+  "name": "zoom-meeting-bot",
+  "version": "1.0.0",
+  "description": "Headless browser bot for Zoom audio recording and streaming",
+  "main": "zoom_bot.js",
+  "dependencies": {
+    "playwright": "^1.45.0",
+    "ws": "^8.17.1",
+    "dotenv": "^16.4.5"
+  }
+}
