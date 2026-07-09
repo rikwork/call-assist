@@ -529,6 +529,18 @@
                 </div>
             </div>
             
+            <!-- Zoom Bot Control Panel -->
+            <div class="bot-control-panel" style="padding: 16px; background: rgba(255,255,255,0.02); border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 10px;">
+                <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Подключение Zoom-бота</div>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="zoom-url-input" placeholder="Вставьте ссылку на встречу Zoom..." style="flex: 1; padding: 10px 14px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 0.9rem; outline: none; transition: border-color 0.2s;" onfocus="this.style.borderColor='var(--accent-color)'" onblur="this.style.borderColor='var(--border-color)'">
+                    <button id="toggle-bot-btn" style="padding: 10px 16px; background: var(--accent-color); border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
+                        <span>Подключить</span>
+                    </button>
+                </div>
+                <div id="bot-status-msg" style="font-size: 0.8rem; color: var(--text-secondary); display: none; margin-top: 2px;"></div>
+            </div>
+            
             <div class="transcript-container" id="transcript-feed">
                 <!-- Dialogue will load here dynamically -->
                 <div class="welcome-card" style="border: none; background: transparent; padding: 20px;">
@@ -786,6 +798,81 @@
 
         // Connect on page load
         connect();
+
+        // Zoom Bot control panel setup
+        const zoomUrlInput = document.getElementById('zoom-url-input');
+        const toggleBotBtn = document.getElementById('toggle-bot-btn');
+        const botStatusMsg = document.getElementById('bot-status-msg');
+        let botActive = false;
+
+        toggleBotBtn.addEventListener('click', async () => {
+            if (!botActive) {
+                const zoomUrl = zoomUrlInput.value.trim();
+                if (!zoomUrl) {
+                    alert('Пожалуйста, вставьте корректную ссылку на встречу Zoom');
+                    return;
+                }
+                
+                toggleBotBtn.disabled = true;
+                toggleBotBtn.innerHTML = '<span>Запуск...</span>';
+                botStatusMsg.style.display = 'block';
+                botStatusMsg.style.color = 'var(--text-secondary)';
+                botStatusMsg.textContent = 'Запуск бота в контейнере...';
+                
+                try {
+                    const res = await fetch('/bot/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ zoom_url: zoomUrl, session_id: sessionId })
+                    });
+                    const data = await res.json();
+                    
+                    if (data.status === 'success') {
+                        botActive = true;
+                        toggleBotBtn.disabled = false;
+                        toggleBotBtn.style.background = '#ef4444'; // Red for stop
+                        toggleBotBtn.innerHTML = '<span>Отключить</span>';
+                        botStatusMsg.style.color = '#10b981'; // Green status
+                        botStatusMsg.textContent = 'Бот успешно зашел на встречу!';
+                    } else {
+                        throw new Error(data.message || 'Ошибка запуска бота');
+                    }
+                } catch (e) {
+                    toggleBotBtn.disabled = false;
+                    toggleBotBtn.style.background = 'var(--accent-color)';
+                    toggleBotBtn.innerHTML = '<span>Подключить</span>';
+                    botStatusMsg.style.color = '#ef4444';
+                    botStatusMsg.textContent = `Ошибка: ${e.message}`;
+                }
+            } else {
+                toggleBotBtn.disabled = true;
+                toggleBotBtn.innerHTML = '<span>Остановка...</span>';
+                
+                try {
+                    const res = await fetch('/bot/stop', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId })
+                    });
+                    const data = await res.json();
+                    
+                    if (data.status === 'success') {
+                        botActive = false;
+                        toggleBotBtn.disabled = false;
+                        toggleBotBtn.style.background = 'var(--accent-color)';
+                        toggleBotBtn.innerHTML = '<span>Подключить</span>';
+                        zoomUrlInput.value = '';
+                        botStatusMsg.style.display = 'none';
+                    } else {
+                        throw new Error(data.message || 'Ошибка остановки бота');
+                    }
+                } catch (e) {
+                    toggleBotBtn.disabled = false;
+                    botStatusMsg.style.color = '#ef4444';
+                    botStatusMsg.textContent = `Ошибка: ${e.message}`;
+                }
+            }
+        });
     </script>
 </body>
 </html>
