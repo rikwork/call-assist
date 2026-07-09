@@ -152,6 +152,18 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
     session = get_session(session_id)
     print(f"[{session_id}] Audio streaming source connected.")
     
+    # Broadcast connection success to UI clients
+    payload_init = {
+        "type": "bot_status",
+        "connected": True,
+        "message": "Бот успешно подключился к аудиопотоку встречи!"
+    }
+    for client in list(session.connected_clients):
+        try:
+            await client.send_json(payload_init)
+        except Exception:
+            pass
+            
     vad_processor = VADProcessor(
         sample_rate=config.SAMPLE_RATE,
         frame_duration_ms=config.FRAME_DURATION_MS,
@@ -171,9 +183,6 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                 if vad_result["speech_started"]:
                     session.rate_limit_skipped = False
                     session.audio_buffer.clear()  # Clear for fresh speech capture
-                    if session.speculative_task and not session.speculative_task.done():
-                        session.speculative_task.cancel()
-                        print(f"\n[{session_id}] [VAD] Speech started! Speculative task CANCELLED.")
                 
                 # Logic: Accumulate Audio during speech
                 if vad_result["is_speaking"]:
@@ -188,8 +197,8 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                         # Make sure we have at least 0.5s of recorded audio
                         if len(session.audio_buffer) >= 16000 and (session.speculative_task is None or session.speculative_task.done()):
                             now = time.time()
-                            # 12 seconds cooldown (max 5 requests per minute for Free Tier)
-                            if now - session.last_query_time >= 12.0:
+                            # 2.5 seconds cooldown (responsive but protects API limits)
+                            if now - session.last_query_time >= 2.5:
                                 session.last_query_time = now
                                 session.rate_limit_skipped = False
                                 
@@ -205,7 +214,7 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                             else:
                                 if not session.rate_limit_skipped:
                                     session.rate_limit_skipped = True
-                                    print(f"[{session_id}] [VAD] Silence reached, but API query rate-limited to protect Free Tier (cooldown: {12.0 - (now - session.last_query_time):.1f}s).")
+                                    print(f"[{session_id}] [VAD] Silence reached, but API query rate-limited to protect Free Tier (cooldown: {2.5 - (now - session.last_query_time):.1f}s).")
                             
             elif "text" in message:
                 data = json.loads(message["text"])
@@ -238,6 +247,18 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
         print(f"[{session_id}] Audio streaming source disconnected.")
     except Exception as e:
         print(f"[{session_id}] Error in audio stream connection for session {session_id}: {e}")
+    finally:
+        # Broadcast disconnection to UI clients
+        payload_disc = {
+            "type": "bot_status",
+            "connected": False,
+            "message": "Бот отключился от трансляции аудио."
+        }
+        for client in list(session.connected_clients):
+            try:
+                await client.send_json(payload_disc)
+            except Exception:
+                pass
 
 @app.post("/bot/start")
 async def start_bot(data: dict):

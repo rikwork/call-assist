@@ -7,7 +7,7 @@ load_dotenv()
 # Google Antigravity SDK Configuration
 MODEL_NAME = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.5-flash")
 TEMPERATURE = 0.2
-MOCK_MODE = os.environ.get("MOCK_AGENT", "True").lower() in ("true", "1", "t", "y", "yes")
+MOCK_MODE = os.environ.get("MOCK_AGENT", "False").lower() in ("true", "1", "t", "y", "yes")
 
 # Audio & Voice Activity Detection (VAD) Settings
 SAMPLE_RATE = 16000  # 16kHz audio expected
