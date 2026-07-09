@@ -76,6 +76,13 @@ async function run() {
 
     const page = await context.newPage();
     
+    // Hide webdriver flag to bypass basic bot detectors
+    await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+    });
+    
     try {
         console.log(`[Zoom Bot] Navigating to Zoom URL...`);
         await page.goto(zoomUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
@@ -96,7 +103,7 @@ async function run() {
         console.log('[Zoom Bot] Waiting for Name input...');
         const nameInputSelector = 'input[name="name"], #inputname, input[type="text"]';
         await page.waitForSelector(nameInputSelector, { timeout: 15000 });
-        await page.fill(nameInputSelector, 'ИИ-Ассистент');
+        await page.fill(nameInputSelector, 'Никита');
         
         console.log('[Zoom Bot] Clicking Join Button...');
         const joinBtnSelector = 'button.wc-btn-join, #joinBtn, button:has-text("Join"), button:has-text("Войти"), button:has-text("Присоединиться"), button.preview-join-button';
