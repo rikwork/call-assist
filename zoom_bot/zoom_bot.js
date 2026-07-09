@@ -62,10 +62,12 @@ async function run() {
     console.log('[Zoom Bot] Launching Chromium browser...');
     const browser = await chromium.launch({
         headless: false, 
+        ignoreDefaultArgs: ['--enable-automation'],
         args: [
             '--use-fake-ui-for-media-stream',
             '--use-fake-device-for-media-stream',
-            '--autoplay-policy=no-user-gesture-required'
+            '--autoplay-policy=no-user-gesture-required',
+            '--disable-blink-features=AutomationControlled'
         ]
     });
 
