@@ -533,13 +533,10 @@
             <div class="audio-sources-panel" style="padding: 16px; background: rgba(255,255,255,0.02); border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 12px;">
                 <!-- Section 1: Browser WebRTC Loopback -->
                 <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Способ 1: Захват звука с вкладки/экрана или микрофона</div>
+                    <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Способ 1: Захват звука встречи (Микрофон + Звук ПК)</div>
                     <div style="display: flex; gap: 8px; align-items: center;">
-                        <button id="start-capture-btn" style="flex: 1; padding: 10px 12px; background: var(--accent-color); border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;">
-                            <span>Захватить звук с ПК</span>
-                        </button>
-                        <button id="start-mic-btn" style="flex: 1; padding: 10px 12px; background: #10b981; border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;">
-                            <span>Захватить микрофон</span>
+                        <button id="start-capture-btn" style="flex: 1; padding: 10px 16px; background: #10b981; border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;">
+                            <span>Запустить полный захват звука</span>
                         </button>
                     </div>
                     <div id="capture-status-msg" style="font-size: 0.8rem; color: var(--text-secondary); display: none; margin-top: 2px;"></div>
@@ -912,7 +909,8 @@
             }
         });
 
-        // WebRTC Screen/Tab Audio Capture setup
+        // WebRTC Call Audio Capture setup (Microphone + Screen/Tab Audio)
+        let micStream = null;
         let screenStream = null;
         let audioContext = null;
         let audioProcessor = null;
@@ -927,9 +925,19 @@
                 try {
                     captureStatusMsg.style.display = 'block';
                     captureStatusMsg.style.color = 'var(--text-secondary)';
-                    captureStatusMsg.textContent = 'Запрос разрешения на совместный доступ к аудио...';
                     
-                    // Request screen/tab sharing with system audio capture
+                    // 1. Request microphone access first
+                    captureStatusMsg.textContent = 'Запрос доступа к микрофону...';
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    });
+                    
+                    // 2. Request screen/tab sharing with system audio capture
+                    captureStatusMsg.textContent = 'Выберите вкладку/окно Zoom и поставьте галочку "Предоставить доступ к аудио"...';
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             displaySurface: "browser",
@@ -943,12 +951,12 @@
                         }
                     });
                     
-                    const audioTracks = screenStream.getAudioTracks();
-                    if (audioTracks.length === 0) {
+                    const screenAudioTracks = screenStream.getAudioTracks();
+                    if (screenAudioTracks.length === 0) {
                         throw new Error('Вы не выбрали опцию "Передавать аудио" при выборе вкладки или экрана.');
                     }
                     
-                    // Connect to raw PCM websocket channel
+                    // 3. Connect to raw PCM websocket channel
                     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                     const audioWsUri = `${protocol}//${window.location.host}/audio/${sessionId}`;
                     captureStatusMsg.textContent = 'Подключение к WebSocket сервера...';
@@ -958,12 +966,12 @@
                     audioWs.onopen = () => {
                         console.log('[WebRTC Capture] Audio WebSocket connected.');
                         captureStatusMsg.style.color = '#10b981'; // Green
-                        captureStatusMsg.textContent = 'Трансляция звука активна. Включите звук в Zoom!';
+                        captureStatusMsg.textContent = 'Полный захват звонка активен! Идет запись микрофона + звука ПК.';
                         startCaptureBtn.style.background = '#ef4444'; // Red for stop
                         startCaptureBtn.innerHTML = '<span>Остановить захват</span>';
                         isCapturing = true;
                         
-                        startAudioProcessing(screenStream);
+                        startAudioProcessing(micStream, screenStream);
                     };
                     
                     audioWs.onclose = () => {
@@ -989,13 +997,17 @@
             }
         });
 
-        function startAudioProcessing(stream) {
+        function startAudioProcessing(micStreamSource, screenStreamSource) {
             // Context matches 16kHz VAD configuration on backend
             audioContext = new (window.AudioContext || window.webkitAudioContext)({
                 sampleRate: 16000
             });
             
-            const source = audioContext.createMediaStreamSource(stream);
+            // Create audio sources for both mic and system loopback
+            const micSourceNode = audioContext.createMediaStreamSource(micStreamSource);
+            const screenSourceNode = audioContext.createMediaStreamSource(screenStreamSource);
+            
+            // Create script processor to intercept combined raw audio
             audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
             
             audioProcessor.onaudioprocess = (e) => {
@@ -1010,18 +1022,21 @@
                     pcmBuffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                 }
                 
-                // Stream binary PCM bytes to backend VAD
+                // Stream combined mono binary PCM bytes to backend
                 audioWs.send(pcmBuffer.buffer);
             };
             
-            source.connect(audioProcessor);
+            // Connect BOTH sources to the processor node to mix/sum them natively!
+            micSourceNode.connect(audioProcessor);
+            screenSourceNode.connect(audioProcessor);
+            
             audioProcessor.connect(audioContext.destination);
         }
 
         function stopCapture() {
             isCapturing = false;
-            startCaptureBtn.style.background = 'var(--accent-color)';
-            startCaptureBtn.innerHTML = '<span>Захватить звук с ПК</span>';
+            startCaptureBtn.style.background = '#10b981'; // Green
+            startCaptureBtn.innerHTML = '<span>Запустить полный захват звука</span>';
             
             if (audioProcessor) {
                 try { audioProcessor.disconnect(); } catch (e) {}
@@ -1031,91 +1046,9 @@
                 try { audioContext.close(); } catch (e) {}
                 audioContext = null;
             }
-            if (screenStream) {
-                screenStream.getTracks().forEach(track => track.stop());
-                screenStream = null;
-            }
-            if (audioWs) {
-                try { audioWs.close(); } catch (e) {}
-                audioWs = null;
-            }
-            
-            captureStatusMsg.style.display = 'none';
-        }
-
-        // WebRTC Microphone Capture setup
-        const startMicBtn = document.getElementById('start-mic-btn');
-        let isMicCapturing = false;
-
-        startMicBtn.addEventListener('click', async () => {
-            if (!isMicCapturing) {
-                try {
-                    captureStatusMsg.style.display = 'block';
-                    captureStatusMsg.style.color = 'var(--text-secondary)';
-                    captureStatusMsg.textContent = 'Запрос разрешения на доступ к микрофону...';
-                    
-                    // Request microphone access
-                    screenStream = await navigator.mediaDevices.getUserMedia({
-                        audio: {
-                            echoCancellation: true,
-                            noiseSuppression: true,
-                            autoGainControl: true
-                        }
-                    });
-                    
-                    // Connect to raw PCM websocket channel
-                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const audioWsUri = `${protocol}//${window.location.host}/audio/${sessionId}`;
-                    captureStatusMsg.textContent = 'Подключение к WebSocket сервера...';
-                    
-                    audioWs = new WebSocket(audioWsUri);
-                    
-                    audioWs.onopen = () => {
-                        console.log('[Mic Capture] Audio WebSocket connected.');
-                        captureStatusMsg.style.color = '#10b981'; // Green
-                        captureStatusMsg.textContent = 'Трансляция микрофона активна. Говорите!';
-                        startMicBtn.style.background = '#ef4444'; // Red for stop
-                        startMicBtn.innerHTML = '<span>Остановить микрофон</span>';
-                        isMicCapturing = true;
-                        
-                        startAudioProcessing(screenStream);
-                    };
-                    
-                    audioWs.onclose = () => {
-                        console.log('[Mic Capture] Audio WebSocket closed.');
-                        stopMicCapture();
-                    };
-                    
-                    audioWs.onerror = (err) => {
-                        console.error('[Mic Capture] WebSocket error:', err);
-                        stopMicCapture();
-                        captureStatusMsg.style.color = '#ef4444';
-                        captureStatusMsg.textContent = 'Ошибка подключения к WebSocket сервера.';
-                    };
-                    
-                } catch (e) {
-                    console.error('[Mic Capture] Start failed:', e);
-                    stopMicCapture();
-                    captureStatusMsg.style.color = '#ef4444';
-                    captureStatusMsg.textContent = `Ошибка: ${e.message}`;
-                }
-            } else {
-                stopMicCapture();
-            }
-        });
-
-        function stopMicCapture() {
-            isMicCapturing = false;
-            startMicBtn.style.background = '#10b981'; // Back to green
-            startMicBtn.innerHTML = '<span>Захватить микрофон</span>';
-            
-            if (audioProcessor) {
-                try { audioProcessor.disconnect(); } catch (e) {}
-                audioProcessor = null;
-            }
-            if (audioContext) {
-                try { audioContext.close(); } catch (e) {}
-                audioContext = null;
+            if (micStream) {
+                micStream.getTracks().forEach(track => track.stop());
+                micStream = null;
             }
             if (screenStream) {
                 screenStream.getTracks().forEach(track => track.stop());
