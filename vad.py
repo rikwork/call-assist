@@ -55,6 +55,12 @@ class VADProcessor:
         energy = self.calculate_energy(chunk_bytes)
         is_active = energy > self.energy_threshold
         
+        # Calculate actual chunk duration dynamically in ms
+        num_samples = len(chunk_bytes) // 2
+        chunk_duration_ms = int((num_samples / self.sample_rate) * 1000) if self.sample_rate > 0 else 0
+        if chunk_duration_ms == 0:
+            chunk_duration_ms = self.frame_duration_ms
+            
         speech_started = False
         speech_ended = False
         
@@ -68,7 +74,7 @@ class VADProcessor:
                 self.speech_duration_ms = 0
             
             if self.is_speaking:
-                self.speech_duration_ms += self.frame_duration_ms
+                self.speech_duration_ms += chunk_duration_ms
                 self.silence_duration_ms = 0
         else:
             self.consecutive_speech_frames = 0
@@ -77,10 +83,10 @@ class VADProcessor:
             if self.is_speaking and self.consecutive_silence_frames >= self.silence_confirm_frames:
                 self.is_speaking = False
                 speech_ended = True
-                self.silence_duration_ms = self.consecutive_silence_frames * self.frame_duration_ms
+                self.silence_duration_ms = self.consecutive_silence_frames * chunk_duration_ms
             
             if not self.is_speaking:
-                self.silence_duration_ms += self.frame_duration_ms
+                self.silence_duration_ms += chunk_duration_ms
                 self.speech_duration_ms = 0
                 
         return {
