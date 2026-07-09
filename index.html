@@ -529,16 +529,32 @@
                 </div>
             </div>
             
-            <!-- Zoom Bot Control Panel -->
-            <div class="bot-control-panel" style="padding: 16px; background: rgba(255,255,255,0.02); border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 10px;">
-                <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Подключение Zoom-бота</div>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" id="zoom-url-input" placeholder="Вставьте ссылку на встречу Zoom..." style="flex: 1; padding: 10px 14px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 0.9rem; outline: none; transition: border-color 0.2s;" onfocus="this.style.borderColor='var(--accent-color)'" onblur="this.style.borderColor='var(--border-color)'">
-                    <button id="toggle-bot-btn" style="padding: 10px 16px; background: var(--accent-color); border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
-                        <span>Подключить</span>
-                    </button>
+            <!-- Audio Sources Panel -->
+            <div class="audio-sources-panel" style="padding: 16px; background: rgba(255,255,255,0.02); border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 12px;">
+                <!-- Section 1: Browser WebRTC Loopback -->
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Способ 1: Захват звука с вкладки/экрана (Без ботов)</div>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <button id="start-capture-btn" style="flex: 1; padding: 10px 16px; background: var(--accent-color); border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                            <span>Захватить звук с ПК</span>
+                        </button>
+                    </div>
+                    <div id="capture-status-msg" style="font-size: 0.8rem; color: var(--text-secondary); display: none; margin-top: 2px;"></div>
                 </div>
-                <div id="bot-status-msg" style="font-size: 0.8rem; color: var(--text-secondary); display: none; margin-top: 2px;"></div>
+
+                <div style="border-top: 1px dashed var(--border-color); margin: 4px 0;"></div>
+
+                <!-- Section 2: Zoom Bot -->
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Способ 2: Подключение Zoom-бота</div>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="zoom-url-input" placeholder="Вставьте ссылку на встречу Zoom..." style="flex: 1; padding: 10px 14px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 0.9rem; outline: none; transition: border-color 0.2s;" onfocus="this.style.borderColor='var(--accent-color)'" onblur="this.style.borderColor='var(--border-color)'">
+                        <button id="toggle-bot-btn" style="padding: 10px 16px; background: var(--accent-color); border: none; border-radius: 8px; color: white; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
+                            <span>Подключить бота</span>
+                        </button>
+                    </div>
+                    <div id="bot-status-msg" style="font-size: 0.8rem; color: var(--text-secondary); display: none; margin-top: 2px;"></div>
+                </div>
             </div>
             
             <div class="transcript-container" id="transcript-feed">
@@ -662,8 +678,27 @@
             ws.onmessage = (event) => {
                 const message = JSON.parse(event.data);
                 
-                if (message.type === 'status') {
+                 if (message.type === 'status') {
                     console.log("Status update from server:", message.message);
+                }
+                
+                if (message.type === 'bot_status') {
+                    botStatusMsg.style.display = 'block';
+                    if (message.connected) {
+                        botActive = true;
+                        toggleBotBtn.disabled = false;
+                        toggleBotBtn.style.background = '#ef4444'; // Red for stop
+                        toggleBotBtn.innerHTML = '<span>Отключить</span>';
+                        botStatusMsg.style.color = '#10b981'; // Green status
+                        botStatusMsg.textContent = message.message;
+                    } else {
+                        botActive = false;
+                        toggleBotBtn.disabled = false;
+                        toggleBotBtn.style.background = 'var(--accent-color)';
+                        toggleBotBtn.innerHTML = '<span>Подключить</span>';
+                        botStatusMsg.style.color = '#ef4444'; // Red status
+                        botStatusMsg.textContent = message.message;
+                    }
                 }
                 
                 if (message.type === 'transcript_update') {
@@ -873,6 +908,137 @@
                 }
             }
         });
+
+        // WebRTC Screen/Tab Audio Capture setup
+        let screenStream = null;
+        let audioContext = null;
+        let audioProcessor = null;
+        let audioWs = null;
+        let isCapturing = false;
+
+        const startCaptureBtn = document.getElementById('start-capture-btn');
+        const captureStatusMsg = document.getElementById('capture-status-msg');
+
+        startCaptureBtn.addEventListener('click', async () => {
+            if (!isCapturing) {
+                try {
+                    captureStatusMsg.style.display = 'block';
+                    captureStatusMsg.style.color = 'var(--text-secondary)';
+                    captureStatusMsg.textContent = 'Запрос разрешения на совместный доступ к аудио...';
+                    
+                    // Request screen/tab sharing with system audio capture
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: {
+                            displaySurface: "browser",
+                            width: 1,
+                            height: 1
+                        },
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false
+                        }
+                    });
+                    
+                    const audioTracks = screenStream.getAudioTracks();
+                    if (audioTracks.length === 0) {
+                        throw new Error('Вы не выбрали опцию "Передавать аудио" при выборе вкладки или экрана.');
+                    }
+                    
+                    // Connect to raw PCM websocket channel
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const audioWsUri = `${protocol}//${window.location.host}/audio/${sessionId}`;
+                    captureStatusMsg.textContent = 'Подключение к WebSocket сервера...';
+                    
+                    audioWs = new WebSocket(audioWsUri);
+                    
+                    audioWs.onopen = () => {
+                        console.log('[WebRTC Capture] Audio WebSocket connected.');
+                        captureStatusMsg.style.color = '#10b981'; // Green
+                        captureStatusMsg.textContent = 'Трансляция звука активна. Включите звук в Zoom!';
+                        startCaptureBtn.style.background = '#ef4444'; // Red for stop
+                        startCaptureBtn.innerHTML = '<span>Остановить захват</span>';
+                        isCapturing = true;
+                        
+                        startAudioProcessing(screenStream);
+                    };
+                    
+                    audioWs.onclose = () => {
+                        console.log('[WebRTC Capture] Audio WebSocket closed.');
+                        stopCapture();
+                    };
+                    
+                    audioWs.onerror = (err) => {
+                        console.error('[WebRTC Capture] WebSocket error:', err);
+                        stopCapture();
+                        captureStatusMsg.style.color = '#ef4444';
+                        captureStatusMsg.textContent = 'Ошибка подключения к WebSocket сервера.';
+                    };
+                    
+                } catch (e) {
+                    console.error('[WebRTC Capture] Start failed:', e);
+                    stopCapture();
+                    captureStatusMsg.style.color = '#ef4444';
+                    captureStatusMsg.textContent = `Ошибка: ${e.message}`;
+                }
+            } else {
+                stopCapture();
+            }
+        });
+
+        function startAudioProcessing(stream) {
+            // Context matches 16kHz VAD configuration on backend
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 16000
+            });
+            
+            const source = audioContext.createMediaStreamSource(stream);
+            audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+            
+            audioProcessor.onaudioprocess = (e) => {
+                if (!audioWs || audioWs.readyState !== WebSocket.OPEN) return;
+                
+                const inputData = e.inputBuffer.getChannelData(0);
+                
+                // Convert Float32 samples [-1.0, 1.0] to Int16 PCM bytes
+                const pcmBuffer = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcmBuffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                
+                // Stream binary PCM bytes to backend VAD
+                audioWs.send(pcmBuffer.buffer);
+            };
+            
+            source.connect(audioProcessor);
+            audioProcessor.connect(audioContext.destination);
+        }
+
+        function stopCapture() {
+            isCapturing = false;
+            startCaptureBtn.style.background = 'var(--accent-color)';
+            startCaptureBtn.innerHTML = '<span>Захватить звук с ПК</span>';
+            
+            if (audioProcessor) {
+                try { audioProcessor.disconnect(); } catch (e) {}
+                audioProcessor = null;
+            }
+            if (audioContext) {
+                try { audioContext.close(); } catch (e) {}
+                audioContext = null;
+            }
+            if (screenStream) {
+                screenStream.getTracks().forEach(track => track.stop());
+                screenStream = null;
+            }
+            if (audioWs) {
+                try { audioWs.close(); } catch (e) {}
+                audioWs = null;
+            }
+            
+            captureStatusMsg.style.display = 'none';
+        }
     </script>
 </body>
 </html>
