@@ -2,10 +2,41 @@ import math
 import struct
 from typing import Dict, Any
 
+def extract_stereo_channels(chunk_bytes: bytes) -> tuple[bytes, bytes, float, float]:
+    """
+    De-interleaves 16-bit 2-channel PCM into mono (left_bytes, right_bytes)
+    and calculates RMS energy for each channel.
+    Left (Channel 0) = Mic (Representative / Manager)
+    Right (Channel 1) = Screen Audio (Customer / Nikita)
+    """
+    if not chunk_bytes or len(chunk_bytes) < 4:
+        return chunk_bytes, chunk_bytes, 0.0, 0.0
+        
+    num_samples = len(chunk_bytes) // 4  # 2 bytes per sample * 2 channels
+    if num_samples == 0:
+        return chunk_bytes, chunk_bytes, 0.0, 0.0
+        
+    fmt = f"<{num_samples * 2}h"
+    try:
+        samples = struct.unpack(fmt, chunk_bytes)
+    except Exception:
+        return chunk_bytes, chunk_bytes, 0.0, 0.0
+        
+    left_samples = samples[0::2]
+    right_samples = samples[1::2]
+    
+    left_bytes = struct.pack(f"<{len(left_samples)}h", *left_samples)
+    right_bytes = struct.pack(f"<{len(right_samples)}h", *right_samples)
+    
+    left_rms = math.sqrt(sum(float(s)**2 for s in left_samples) / len(left_samples)) if left_samples else 0.0
+    right_rms = math.sqrt(sum(float(s)**2 for s in right_samples) / len(right_samples)) if right_samples else 0.0
+    
+    return left_bytes, right_bytes, left_rms, right_rms
+
 class VADProcessor:
     """
     Lightweight energy-based Voice Activity Detection (VAD) processor.
-    Processes mono 16-bit PCM audio chunks (default 16kHz).
+    Processes mono or stereo 16-bit PCM audio chunks (default 16kHz).
     """
     def __init__(self, sample_rate: int = 16000, frame_duration_ms: int = 30, energy_threshold: float = 300.0):
         self.sample_rate = sample_rate

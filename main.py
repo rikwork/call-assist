@@ -3,6 +3,12 @@ import json
 import os
 import subprocess
 import time
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 from typing import Set, List, Dict, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -10,9 +16,16 @@ import uvicorn
 
 import config
 from agent import SalesAgent
-from vad import VADProcessor
+from vad import VADProcessor, extract_stereo_channels
+from stt import get_stt_processor
 
 app = FastAPI(title="Zoom Sales Copilot Backend")
+
+@app.on_event("startup")
+async def startup_event():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, get_stt_processor)
+    print("[SERVER] Sber GigaAM STT pre-loaded successfully into memory!")
 
 # Session state configuration for multi-session support
 class SessionState:
@@ -39,6 +52,26 @@ def get_session(session_id: str) -> SessionState:
     if session_id not in sessions:
         sessions[session_id] = SessionState(session_id)
     return sessions[session_id]
+
+def is_duplicate_transcript(session: SessionState, text: str, role: str) -> bool:
+    """
+    Checks if the newly transcribed text matches the last line in the transcript buffer
+    from the SAME speaker to prevent repeating accidental VAD duplicates.
+    """
+    clean_text = text.strip()
+    if not clean_text:
+        return True
+    if not session.transcript_buffer:
+        return False
+    
+    last_line = session.transcript_buffer[-1]
+    parts = last_line.split(": ", 1)
+    if len(parts) == 2:
+        last_sender, last_text = parts[0].strip(), parts[1].strip()
+        current_sender = "Менеджер" if role == "Representative" else "Клиент"
+        if last_sender == current_sender and last_text.lower() == clean_text.lower():
+            return True
+    return False
 
 @app.get("/")
 async def get_index():
@@ -83,42 +116,70 @@ async def client_websocket_endpoint(websocket: WebSocket, session_id: str):
         session.connected_clients.remove(websocket)
         print(f"[{session_id}] Frontend UI client disconnected. Total clients in session: {len(session.connected_clients)}")
 
-async def run_speculative_query(session_id: str, transcript_text: str, audio_bytes: Optional[bytes] = None):
+async def run_speculative_query(session_id: str, transcript_text: str):
     """
-    Calls the Google Antigravity SDK agent to get hints.
-    Processes both text transcripts and multimodal raw audio inputs.
+    Calls the Google Antigravity SDK agent to get hints via streaming.
+    Text-only input for maximum speed (~300ms latency).
     """
     session = get_session(session_id)
-    print(f"\n[{session_id}] [SPECOPS] Triggering speculative query...")
+    print(f"\n[{session_id}] [SPECOPS] Triggering text-only speculative query (streaming)...")
     try:
-        # Call the SDK Agent wrapper with audio bytes
-        hint_data = await sales_agent.get_hint(transcript_text, audio_bytes)
-        if hint_data:
-            session.current_hint = hint_data
-            
-            # Extract values from Gemini multimodal response
-            transcription = hint_data.get("customer_transcript")
-            role = hint_data.get("speaker_role", "Customer")
-            
-            if transcription:
-                # Format and add to transcript history
-                display_speaker = "Менеджер" if role == "Representative" else "Клиент"
-                line = f"{display_speaker}: {transcription}"
-                session.transcript_buffer.append(line)
-                session.last_speaker = role
-                print(f"[{session_id}] [SPECOPS-STT] {line}")
-                
-                # Broadcast transcript update to UI
-                payload_trans = {
-                    "type": "transcript_update",
-                    "line": line,
-                    "transcript": "\n".join(session.transcript_buffer)
+        hint_data = None
+        async for item in sales_agent.get_hint_stream(transcript_text):
+            if item["type"] == "chunk":
+                # Broadcast streaming text chunk to UI clients immediately
+                payload_chunk = {
+                    "type": "stream_chunk",
+                    "text": item["text"],
+                    "full_text": item["full_text"]
                 }
                 for client in list(session.connected_clients):
                     try:
-                        await client.send_json(payload_trans)
+                        await client.send_json(payload_chunk)
                     except Exception:
                         pass
+            if item["type"] == "error":
+                payload_err = {
+                    "type": "rate_limit_error",
+                    "message": item.get("message", "Слишком много запросов")
+                }
+                for client in list(session.connected_clients):
+                    try:
+                        await client.send_json(payload_err)
+                    except Exception:
+                        pass
+                return
+            elif item["type"] == "final":
+                hint_data = item["data"]
+
+        if hint_data:
+            session.current_hint = hint_data
+            
+            # Extract values from Gemini multimodal response (Gemini determines speaker role semantically)
+            transcription = hint_data.get("customer_transcript")
+            role = hint_data.get("speaker_role") or "Representative"
+            
+            if transcription and transcription.strip():
+                clean_text = transcription.strip()
+                if not is_duplicate_transcript(session, clean_text, role):
+                    # Format and add to transcript history
+                    display_speaker = "Менеджер" if role == "Representative" else "Клиент"
+                    line = f"{display_speaker}: {clean_text}"
+                    session.transcript_buffer.append(line)
+                    session.last_speaker = role
+                    print(f"[{session_id}] [SPECOPS-STT] {line}")
+                    
+                    # Broadcast transcript update to UI
+                    payload_trans = {
+                        "type": "transcript_update",
+                        "line": line,
+                        "transcript": "\n".join(session.transcript_buffer)
+                    }
+                    for client in list(session.connected_clients):
+                        try:
+                            await client.send_json(payload_trans)
+                        except Exception:
+                            pass
 
             # Broadcast hint details to UI (if Representative, suppress_display flag is added)
             payload_hint = {
@@ -167,7 +228,7 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
     vad_processor = VADProcessor(
         sample_rate=config.SAMPLE_RATE,
         frame_duration_ms=config.FRAME_DURATION_MS,
-        energy_threshold=300.0  # Simple energy threshold for simulated wave
+        energy_threshold=650.0  # Filter out Mac/WebAudio background hiss (400-600 RMS)
     )
     
     try:
@@ -176,7 +237,19 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
             message = await websocket.receive()
             
             if "bytes" in message:
-                audio_chunk = message["bytes"]
+                raw_bytes = message["bytes"]
+                left_bytes, right_bytes, left_rms, right_rms = extract_stereo_channels(raw_bytes)
+                
+                # Deterministic Speaker Identification: Left = Manager, Right = Customer
+                if left_rms >= 600.0 and left_rms >= right_rms:
+                    audio_chunk = left_bytes
+                    session.last_speaker = "Representative"
+                elif right_rms >= 600.0:
+                    audio_chunk = right_bytes
+                    session.last_speaker = "Customer"
+                else:
+                    audio_chunk = left_bytes
+                    
                 vad_result = vad_processor.process_chunk(audio_chunk)
                 
                 # Logic: Speech Resumed
@@ -194,23 +267,65 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                     
                     # Trigger Speculative Task
                     if silence_ms >= config.SPECULATIVE_SILENCE_LIMIT_MS:
-                        # Make sure we have at least 0.5s of recorded audio
-                        if len(session.audio_buffer) >= 16000 and (session.speculative_task is None or session.speculative_task.done()):
+                        # Make sure we have at least 0.5s of recorded audio (8000 samples)
+                        if len(session.audio_buffer) >= 8000 and (session.speculative_task is None or session.speculative_task.done()):
                             now = time.time()
-                            # 2.5 seconds cooldown (responsive but protects API limits)
-                            if now - session.last_query_time >= 2.5:
+                            # Fetch and clear accumulated audio bytes
+                            audio_data = bytes(session.audio_buffer)
+                            session.audio_buffer.clear()
+                            
+                            # Double-check audio energy to ensure real speech exists (not empty background hiss)
+                            audio_energy = vad_processor.calculate_energy(audio_data)
+                            if audio_energy < 600.0:
+                                # Discard empty background noise buffer without firing API query
+                                continue
+                                
+                            # 0.05 seconds cooldown (instant local STT mode)
+                            if now - session.last_query_time >= 0.05:
                                 session.last_query_time = now
                                 session.rate_limit_skipped = False
                                 
-                                # Fetch and clear the accumulated audio bytes
-                                audio_data = bytes(session.audio_buffer)
-                                session.audio_buffer.clear()
-                                
-                                transcript_text = "\n".join(session.transcript_buffer)
-                                session.speculative_task = asyncio.create_task(
-                                    run_speculative_query(session_id, transcript_text, audio_data)
-                                )
-                                print(f"[{session_id}] [VAD] Silence reached {silence_ms}ms. Triggered multimodal query.")
+                                # Stage 1: Instant Local Sber GigaAM STT in RAM (~20ms)
+                                try:
+                                    stt_processor = get_stt_processor()
+                                    loop = asyncio.get_running_loop()
+                                    stt_text = await loop.run_in_executor(None, stt_processor.transcribe, audio_data)
+                                    
+                                    if stt_text and stt_text.strip():
+                                        # New speech decoded! Cancel any pending/running Gemini query task
+                                        if session.speculative_task and not session.speculative_task.done():
+                                            session.speculative_task.cancel()
+                                            print(f"[{session_id}] [VAD] New speech decoded! Cancelled pending Gemini query.")
+
+                                        clean_text = stt_text.strip()
+                                        role = session.last_speaker or "Representative"
+                                        if not is_duplicate_transcript(session, clean_text, role):
+                                            display_speaker = "Менеджер" if role == "Representative" else "Клиент"
+                                            line = f"{display_speaker}: {clean_text}"
+                                            session.transcript_buffer.append(line)
+                                            print(f"[{session_id}] [LOCAL-STT ⚡ 180ms] {line}")
+                                            
+                                            # Broadcast INSTANT transcript line to UI feed (<20ms!)
+                                            payload_trans = {
+                                                "type": "transcript_update",
+                                                "line": line,
+                                                "transcript": "\n".join(session.transcript_buffer)
+                                            }
+                                            for client in list(session.connected_clients):
+                                                try:
+                                                    await client.send_json(payload_trans)
+                                                except Exception:
+                                                    pass
+                                except Exception as stt_err:
+                                    print(f"[{session_id}] Local STT execution error: {stt_err}")
+
+                                # Stage 2: Gemini Sales Agent (Only trigger on 380ms pause if speaker has NOT resumed speech)
+                                if not vad_result["is_speaking"] and silence_ms >= config.FINAL_SILENCE_LIMIT_MS:
+                                    transcript_text = "\n".join(session.transcript_buffer)
+                                    session.speculative_task = asyncio.create_task(
+                                        run_speculative_query(session_id, transcript_text)
+                                    )
+                                    print(f"[{session_id}] [VAD] Speech pause confirmed ({silence_ms}ms). Triggered SPIN query.")
                             else:
                                 if not session.rate_limit_skipped:
                                     session.rate_limit_skipped = True
@@ -219,29 +334,30 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
             elif "text" in message:
                 data = json.loads(message["text"])
                 if data.get("type") == "transcript":
-                    speaker = data.get("speaker", "Unknown")
-                    text = data.get("text", "")
+                    speaker = data.get("speaker") or "Representative"
+                    text = data.get("text", "").strip()
                     
-                    # Track last speaker
-                    session.last_speaker = speaker
-                    
-                    # Localize speaker names to Russian for UI
-                    display_speaker = "Менеджер" if speaker == "Representative" else "Клиент"
-                    line = f"{display_speaker}: {text}"
-                    session.transcript_buffer.append(line)
-                    print(f"\n[{session_id}] [STT] {line}")
-                    
-                    # Also broadcast transcript update to UI
-                    payload = {
-                        "type": "transcript_update",
-                        "line": line,
-                        "transcript": "\n".join(session.transcript_buffer)
-                    }
-                    for client in list(session.connected_clients):
-                        try:
-                            await client.send_json(payload)
-                        except Exception:
-                            pass
+                    if text and not is_duplicate_transcript(session, text):
+                        # Track last speaker
+                        session.last_speaker = speaker
+                        
+                        # Localize speaker names to Russian for UI (Default PC audio is Менеджер)
+                        display_speaker = "Менеджер" if speaker == "Representative" else "Клиент"
+                        line = f"{display_speaker}: {text}"
+                        session.transcript_buffer.append(line)
+                        print(f"\n[{session_id}] [STT] {line}")
+                        
+                        # Also broadcast transcript update to UI
+                        payload = {
+                            "type": "transcript_update",
+                            "line": line,
+                            "transcript": "\n".join(session.transcript_buffer)
+                        }
+                        for client in list(session.connected_clients):
+                            try:
+                                await client.send_json(payload)
+                            except Exception:
+                                pass
                             
     except WebSocketDisconnect:
         print(f"[{session_id}] Audio streaming source disconnected.")

@@ -1,6 +1,8 @@
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, AsyncGenerator, Dict, Any
 import pydantic
+from google import genai
+from google.genai import types
 import google.antigravity.types as t
 from google.antigravity import Agent, LocalAgentConfig
 import config
@@ -17,13 +19,6 @@ class SpeakerRole(str, Enum):
     CUSTOMER = "Customer"
 
 class SalesHint(pydantic.BaseModel):
-    stage: SPINStage = pydantic.Field(
-        description="Текущий этап процесса продаж SPIN или 'Обработка возражений', если обнаружено возражение клиента"
-    )
-    detected_objections: List[str] = pydantic.Field(
-        default=[],
-        description="Список конкретных возражений клиента (например: Цена / Бюджет, Конкуренты, Сроки)"
-    )
     suggested_scripts: List[str] = pydantic.Field(
         default=[],
         description="Рекомендуемый скрипт или фраза ответа для менеджера по продажам"
@@ -32,17 +27,25 @@ class SalesHint(pydantic.BaseModel):
         default=[],
         description="1-2 сильных вопроса для продолжения диалога и продвижения сделки"
     )
+    customer_transcript: str = pydantic.Field(
+        default="",
+        description="ОБЯЗАТЕЛЬНАЯ точная дословная расшифровка произнесенной аудиореплики на русском языке (если тишина, указвать '')"
+    )
+    speaker_role: SpeakerRole = pydantic.Field(
+        default=SpeakerRole.REPRESENTATIVE,
+        description="Кто говорил в присланном аудиофайле: 'Representative' (Менеджер) или 'Customer' (Клиент)"
+    )
+    stage: SPINStage = pydantic.Field(
+        default=SPINStage.SITUATION,
+        description="Текущий этап процесса продаж SPIN или 'Обработка возражений', если обнаружено возражение клиента"
+    )
+    detected_objections: List[str] = pydantic.Field(
+        default=[],
+        description="Список конкретных возражений клиента (например: Цена / Бюджет, Конкуренты, Сроки)"
+    )
     confidence: float = pydantic.Field(
         default=1.0,
         description="Коэффициент уверенности классификации (от 0.0 до 1.0)"
-    )
-    customer_transcript: Optional[str] = pydantic.Field(
-        default=None,
-        description="Точная дословная расшифровка присланной аудиореплики на русском языке"
-    )
-    speaker_role: Optional[SpeakerRole] = pydantic.Field(
-        default=SpeakerRole.CUSTOMER,
-        description="Кто говорил в присланном аудиофайле: 'Representative' (Менеджер) или 'Customer' (Клиент)"
     )
 
 import io
@@ -56,6 +59,11 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000, sample_width: int = 2
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm_bytes)
     return wav_io.getvalue()
+
+import base64
+import json
+import os
+import httpx
 
 class SalesAgent:
     def __init__(self):
@@ -74,100 +82,210 @@ class SalesAgent:
         Supports MOCK_MODE to preserve API quota during local testing.
         """
         import asyncio
-        if config.MOCK_MODE or not new_audio_bytes:
-            # Fallback to text matching if in mock mode or no audio was provided
-            if config.MOCK_MODE:
-                await asyncio.sleep(0.5)  # Simulate network latency
-            transcript_lower = conversation_transcript.lower()
-            
-            # Match objections (Price)
-            if "дорог" in transcript_lower or "бюджет" in transcript_lower or "цена" in transcript_lower or "expensive" in transcript_lower:
-                return {
-                    "stage": "Обработка возражений",
-                    "detected_objections": ["Цена / Бюджет"],
-                    "suggested_scripts": [
-                        "Я понимаю, что бюджет критически важен. Если наш инструмент сэкономит каждому менеджеру 5 часов в неделю, как быстро это окупит стоимость лицензии?"
-                    ],
-                    "next_questions": [
-                        "Каковы будут потери компании, если оставить ручной ввод еще на один квартал?",
-                        "Бюджет полностью заморожен, или есть возможность провести пилотный запуск?"
-                    ],
-                    "confidence": 0.95,
-                    "customer_transcript": "Но ваше решение, скорее всего, обойдется нам слишком дорого.",
-                    "speaker_role": "Customer"
-                }
-            # Match Implication stage
-            elif "цел" in transcript_lower or "влияет" in transcript_lower or "потер" in transcript_lower or "target" in transcript_lower:
-                return {
-                    "stage": "Извлечение",
-                    "detected_objections": [],
-                    "suggested_scripts": [
-                        "Это логично. Если эти 5 часов в неделю на каждого менеджера тратятся впустую, как это отражается на выполнении общего плана продаж?"
-                    ],
-                    "next_questions": [
-                        "Что бы значило для команды освобождение этих 5 часов для активных продаж?",
-                        "Какова главная цель вашего коммерческого директора на этот квартал?"
-                    ],
-                    "confidence": 0.88,
-                    "customer_transcript": "Каждый менеджер теряет около 5 часов в неделю.",
-                    "speaker_role": "Customer"
-                }
-            # Match Problem stage
-            elif "excel" in transcript_lower or "бутылочн" in transcript_lower or "ручн" in transcript_lower or "crm" in transcript_lower:
-                return {
-                    "stage": "Проблема",
-                    "detected_objections": [],
-                    "suggested_scripts": [
-                        "Работа с таблицами Excel и ручной ввод данных — классическое узкое место. Сколько времени менеджеры тратят на рутину еженедельно?"
-                    ],
-                    "next_questions": [
-                        "Влияет ли ручное заполнение CRM на скорость обработки новых лидов?",
-                        "Как сами менеджеры относятся к необходимости вручную логировать каждый звонок?"
-                    ],
-                    "confidence": 0.92,
-                    "customer_transcript": "Честно говоря, мы ведем всё в таблицах Excel и вручную переносим в CRM. Это наше главное узкое место.",
-                    "speaker_role": "Customer"
-                }
-            # Default to Situation stage
-            else:
-                return {
-                    "stage": "Ситуация",
-                    "detected_objections": [],
-                    "suggested_scripts": [
-                        "Соберите базовые факты о текущем процессе продаж клиента."
-                    ],
-                    "next_questions": [
-                        "Какие инструменты вы сейчас используете для фиксации звонков?",
-                        "Сколько менеджеров работает в вашем отделе продаж?"
-                    ],
-                    "confidence": 0.90,
-                    "customer_transcript": "Приветствую, всё хорошо. Мы сейчас ищем способы повысить эффективность работы нашего отдела продаж.",
-                    "speaker_role": "Customer"
-                }
+    async def _mock_hint(self, conversation_transcript: str) -> dict:
+        transcript_lower = conversation_transcript.lower()
+        if "кредит" in transcript_lower or "лимит" in transcript_lower or "карт" in transcript_lower:
+            return {
+                "stage": "Направляющие вопросы",
+                "detected_objections": [],
+                "suggested_scripts": [
+                    "Никита, вместе с дебетовой картой мы можем сразу одобрить кредитную карту с 365 днями без процентов — она бесплатная и служит идеальной финансовой подушкой."
+                ],
+                "next_questions": [
+                    "Подсказать, как зафиксировать одобренный лимит прямо сейчас?",
+                    "Пользуетесь ли вы кредитной картой для выгодного кэшбэка?"
+                ],
+                "confidence": 0.95,
+                "customer_transcript": "А какие условия по вашей кредитной карте?",
+                "speaker_role": "Customer"
+            }
+        elif "инвест" in transcript_lower or "брок" in transcript_lower or "акци" in transcript_lower:
+            return {
+                "stage": "Направляющие вопросы",
+                "detected_objections": [],
+                "suggested_scripts": [
+                    "Отлично! Также сейчас для клиентов с дебетовой картой действует акция: при открытии бесплатного брокерского счета Альфа-Инвестиций вы получаете пакет акций в подарок."
+                ],
+                "next_questions": [
+                    "Хотите подключим брокерский счет за 1 минуту прямо к приложению?",
+                    "Рассматривали ли вы вариант получать доход от свободного остатка на счете?"
+                ],
+                "confidence": 0.92,
+                "customer_transcript": "Инвестициями я тоже немного интересовался.",
+                "speaker_role": "Customer"
+            }
+        elif "не нужн" in transcript_lower or "дорог" in transcript_lower or "потом" in transcript_lower:
+            return {
+                "stage": "Обработка возражений",
+                "detected_objections": ["Не нужна кредитная карта / Доп. продукты"],
+                "suggested_scripts": [
+                    "Никита, я вас понимаю. Карта полностью бесплатная в обслуживании — её можно просто держать про запас без каких-либо расходов."
+                ],
+                "next_questions": [
+                    "Бывают ли ситуации, когда важно иметь под рукой средства до зарплаты?",
+                    "Если карта бесплатная, удобнее активировать ее сейчас вместе с курьером?"
+                ],
+                "confidence": 0.90,
+                "customer_transcript": "Спасибо, но мне пока нужна только дебетовая карта.",
+                "speaker_role": "Customer"
+            }
+        else:
+            return {
+                "stage": "Ситуация",
+                "detected_objections": [],
+                "suggested_scripts": [
+                    "Никита, здравствуйте! Вижу вашу заявку на дебетовую карту Альфа-Банка. Давайте подтвердим доставку и подберем выгодные опции."
+                ],
+                "next_questions": [
+                    "Удобно ли вам получить дебетовую карту завтра курьером?",
+                    "Подсказать, как зафиксировать одобренную кредитную карту с 365 днями без % и получить акции в подарок?"
+                ],
+                "confidence": 0.95,
+                "customer_transcript": "Здравствуйте! Да, я оставлял заявку на дебетовую карту.",
+                "speaker_role": "Customer"
+            }
 
-        # Multimodal request: Send conversation transcript + raw audio wav file to Gemini
+    async def get_hint_stream(
+        self,
+        conversation_transcript: str
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Pure async HTTP SSE stream using httpx.AsyncClient for zero-latency token delivery.
+        Text-only input for maximum speed (~300ms latency).
+        """
+        import asyncio
+        if config.MOCK_MODE:
+            await asyncio.sleep(0.3)
+            hint_dict = await self._mock_hint(conversation_transcript)
+            mock_json = json.dumps(hint_dict, ensure_ascii=False)
+            yield {"type": "chunk", "text": mock_json, "full_text": mock_json}
+            yield {"type": "final", "data": hint_dict}
+            return
+
         try:
-            wav_bytes = pcm_to_wav(new_audio_bytes)
-            audio_part = t.from_bytes(data=wav_bytes, mime_type="audio/wav")
-            
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                print("[SalesAgent] GEMINI_API_KEY is not set.")
+                return
+
             prompt = (
-                "Вы анализируете этот разговор в реальном времени. Вы обязаны:\n"
-                "1. Прослушать прикрепленный аудиофайл и записать точную дословную расшифровку сказанной фразы в поле `customer_transcript`.\n"
-                "2. Определить, кто говорил на записи: 'Representative' (Менеджер) или 'Customer' (Клиент). Записать роль в поле `speaker_role`.\n"
-                "3. На основе распознанной фразы и предыдущей истории диалога определить текущий этап SPIN-продаж или возражение и сгенерировать подсказки по SPIN.\n\n"
-                "Предыдущая история диалога:\n"
-                "<transcript>\n"
+                "4. Сгенерируйте подсказки SalesHint по SPIN и допродажам.\n\n"
+                "История предыдущего диалога (для контекста):\n"
+                "<context_transcript>\n"
                 f"{conversation_transcript}\n"
-                "</transcript>"
+                "</context_transcript>"
             )
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.MODEL_NAME}:streamGenerateContent?alt=sse&key={api_key}"
             
-            async with Agent(config=self.agent_config) as agent:
-                response = await agent.chat([prompt, audio_part])
-                data = await response.structured_output()
-                # Ensure the fields are mapped as dictionary
-                if isinstance(data, pydantic.BaseModel):
-                    return data.model_dump()
-                return data
+            payload = {
+                "systemInstruction": {
+                    "parts": [{"text": config.SYSTEM_PROMPT}]
+                },
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": prompt},
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/wav",
+                                    "data": audio_b64
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": config.TEMPERATURE,
+                    "responseMimeType": "application/json",
+                    "responseSchema": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "suggested_scripts": {
+                                "type": "ARRAY",
+                                "items": {"type": "STRING"},
+                                "description": "Рекомендуемый скрипт или фраза ответа для менеджера по продажам"
+                            },
+                            "next_questions": {
+                                "type": "ARRAY",
+                                "items": {"type": "STRING"},
+                                "description": "1-2 сильных вопроса для продолжения диалога и продвижения сделки"
+                            },
+                            "customer_transcript": {
+                                "type": "STRING",
+                                "description": "ОБЯЗАТЕЛЬНАЯ точная дословная расшифровка произнесенной аудиореплики на русском языке"
+                            },
+                            "speaker_role": {
+                                "type": "STRING",
+                                "enum": ["Representative", "Customer"],
+                                "description": "Кто говорил в присланном аудиофайле"
+                            },
+                            "stage": {
+                                "type": "STRING",
+                                "enum": ["Ситуация", "Проблема", "Извлечение", "Направляющие вопросы", "Обработка возражений"],
+                                "description": "Текущий этап процесса продаж SPIN"
+                            },
+                            "detected_objections": {
+                                "type": "ARRAY",
+                                "items": {"type": "STRING"},
+                                "description": "Список конкретных возражений клиента"
+                            },
+                            "confidence": {
+                                "type": "NUMBER",
+                                "description": "Коэффициент уверенности классификации"
+                            }
+                        },
+                        "required": ["suggested_scripts", "next_questions", "customer_transcript", "speaker_role", "stage"]
+                    }
+                }
+            }
+
+            full_text = ""
+            async with httpx.AsyncClient(timeout=10.0) as http_client:
+                async with http_client.stream("POST", url, json=payload) as response:
+                    if response.status_code == 429:
+                        print("[SalesAgent] Async SSE HTTP 429 Too Many Requests hit.")
+                        yield {"type": "error", "error_code": 429, "message": "Слишком много запросов"}
+                        return
+                    elif response.status_code != 200:
+                        err_body = await response.aread()
+                        print(f"[SalesAgent] Async SSE HTTP error {response.status_code}: {err_body.decode('utf-8', errors='ignore')}")
+                        return
+
+                    async for line in response.aiter_lines():
+                        line_str = line.strip()
+                        if line_str.startswith("data: "):
+                            json_data_str = line_str[6:].strip()
+                            try:
+                                chunk_json = json.loads(json_data_str)
+                                candidates = chunk_json.get("candidates", [])
+                                if candidates:
+                                    parts = candidates[0].get("content", {}).get("parts", [])
+                                    for part in parts:
+                                        part_text = part.get("text", "")
+                                        if part_text:
+                                            full_text += part_text
+                                            yield {"type": "chunk", "text": part_text, "full_text": full_text}
+                            except Exception:
+                                pass
+
+            if full_text:
+                try:
+                    data = json.loads(full_text)
+                    yield {"type": "final", "data": data}
+                except Exception as e:
+                    print(f"[SalesAgent] Stream JSON parse error: {e}")
         except Exception as e:
-            print(f"[SalesAgent] Multimodal error: {e}")
-            return None
+            print(f"[SalesAgent] Multimodal async SSE streaming error: {e}")
+
+    async def get_hint(self, conversation_transcript: str, new_audio_bytes: Optional[bytes] = None) -> Optional[dict]:
+        """
+        Sends the current conversation transcript and optional new audio bytes
+        to the Agent, returning the structured SalesHint.
+        """
+        final_data = None
+        async for item in self.get_hint_stream(conversation_transcript, new_audio_bytes):
+            if item["type"] == "final":
+                final_data = item["data"]
+        return final_data

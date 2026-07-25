@@ -586,6 +586,10 @@
             </div>
             
             <div class="hints-container" id="hints-feed">
+                <div id="rate-limit-banner" style="display: none; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; color: #fca5a5; font-size: 13px; font-weight: 500; align-items: center; gap: 8px;">
+                    <span>⚠️</span>
+                    <span><strong>Слишком много запросов</strong> (лимит API ИИ). Пожалуйста, сделайте небольшую паузу.</span>
+                </div>
                 <div class="welcome-card" id="welcome-hint">
                     <div class="welcome-icon">🧠</div>
                     <div class="welcome-title">Рекомендации в реальном времени</div>
@@ -705,14 +709,78 @@
                     addTranscriptLine(message.line);
                     // Show processing animation
                     thinkingBadge.style.display = 'flex';
+                    const span = thinkingBadge.querySelector('span');
+                    if (span) span.textContent = 'Анализирую речь...';
+                }
+                
+                if (message.type === 'stream_chunk') {
+                    thinkingBadge.style.display = 'flex';
+                    const span = thinkingBadge.querySelector('span');
+                    if (span) span.textContent = '⚡ Печатает подсказку ИИ...';
+                    
+                    if (message.full_text) {
+                        const partialData = parsePartialJson(message.full_text);
+                        updateHint(partialData, true);
+                    }
                 }
                 
                 if (message.type === 'hint') {
                     // Hide thinking badge
                     thinkingBadge.style.display = 'none';
-                    updateHint(message.data);
+                    updateHint(message.data, false);
+                }
+                
+                if (message.type === 'rate_limit_error') {
+                    thinkingBadge.style.display = 'none';
+                    const banner = document.getElementById('rate-limit-banner');
+                    if (banner) {
+                        banner.style.display = 'flex';
+                        setTimeout(() => {
+                            banner.style.display = 'none';
+                        }, 5000);
+                    }
                 }
             };
+        }
+
+        function parsePartialJson(jsonStr) {
+            const result = {
+                stage: 'Ситуация',
+                suggested_scripts: [],
+                next_questions: [],
+                detected_objections: [],
+                confidence: 1.0,
+                speaker_role: 'Customer'
+            };
+            if (!jsonStr) return result;
+            
+            try {
+                return JSON.parse(jsonStr);
+            } catch (e) {
+                const transMatch = jsonStr.match(/"customer_transcript"\s*:\s*"([^"]*)/);
+                if (transMatch && transMatch[1]) result.customer_transcript = transMatch[1];
+
+                const roleMatch = jsonStr.match(/"speaker_role"\s*:\s*"([^"]+)"/);
+                if (roleMatch) result.speaker_role = roleMatch[1];
+
+                const stageMatch = jsonStr.match(/"stage"\s*:\s*"([^"]+)"/);
+                if (stageMatch) result.stage = stageMatch[1];
+                
+                const scriptMatch = jsonStr.match(/"suggested_scripts"\s*:\s*\[\s*"([^"]*)/);
+                if (scriptMatch && scriptMatch[1]) {
+                    result.suggested_scripts = [scriptMatch[1]];
+                }
+                
+                const qMatch = jsonStr.match(/"next_questions"\s*:\s*\[([\s\S]*?)(?:\]|$)/);
+                if (qMatch) {
+                    const matches = [...qMatch[1].matchAll(/"([^"]*)"/g)];
+                    if (matches.length > 0) {
+                        result.next_questions = matches.map(m => m[1]).filter(q => q.trim().length > 0);
+                    }
+                }
+                
+                return result;
+            }
         }
 
         function addTranscriptLine(line) {
@@ -744,7 +812,7 @@
             transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
         }
 
-        function updateHint(data) {
+        function updateHint(data, isStreaming = false) {
             // Do not update the hint card for Representative (Manager) turns, keeping Customer's hints active.
             if (data.speaker_role === 'Representative') {
                 return;
@@ -785,7 +853,13 @@
             
             // Script recommendations using textContent
             const scripts = data.suggested_scripts || [];
-            hintScript.textContent = scripts.length > 0 ? `"${scripts[0]}"` : '"Продолжайте диалог для накопления контекста..."';
+            if (scripts.length > 0) {
+                hintScript.textContent = `"${scripts[0]}"` + (isStreaming ? ' ▌' : '');
+            } else if (isStreaming) {
+                hintScript.textContent = '"Формирую речевой модуль... ▌"';
+            } else {
+                hintScript.textContent = '"Продолжайте диалог для накопления контекста..."';
+            }
             
             // Next questions lists explicitly using DOM Nodes (XSS protection)
             const questions = data.next_questions || [];
@@ -813,7 +887,7 @@
                 emptyDiv.className = 'question-text';
                 emptyDiv.style.color = 'var(--text-muted)';
                 emptyDiv.style.fontStyle = 'italic';
-                emptyDiv.textContent = 'Конкретных вопросов пока не предложено.';
+                emptyDiv.textContent = isStreaming ? 'Формирование вопросов... ▌' : 'Конкретных вопросов пока не предложено.';
                 questionsList.appendChild(emptyDiv);
             }
         }
@@ -1003,32 +1077,37 @@
                 sampleRate: 16000
             });
             
-            // Create audio sources for both mic and system loopback
+            // Create audio sources for mic (Manager) and screen loopback (Customer / Nikita)
             const micSourceNode = audioContext.createMediaStreamSource(micStreamSource);
             const screenSourceNode = audioContext.createMediaStreamSource(screenStreamSource);
             
-            // Create script processor to intercept combined raw audio
-            audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+            // Route Mic -> Left Channel (0), Screen -> Right Channel (1)
+            const mergerNode = audioContext.createChannelMerger(2);
+            micSourceNode.connect(mergerNode, 0, 0);     // Manager -> Channel 0 (Left)
+            screenSourceNode.connect(mergerNode, 0, 1);  // Customer -> Channel 1 (Right)
+            
+            // Create script processor for 2-channel stereo PCM audio
+            audioProcessor = audioContext.createScriptProcessor(4096, 2, 2);
+            mergerNode.connect(audioProcessor);
             
             audioProcessor.onaudioprocess = (e) => {
                 if (!audioWs || audioWs.readyState !== WebSocket.OPEN) return;
                 
-                const inputData = e.inputBuffer.getChannelData(0);
+                const leftChannel = e.inputBuffer.getChannelData(0);   // Manager
+                const rightChannel = e.inputBuffer.getChannelData(1);  // Customer
                 
-                // Convert Float32 samples [-1.0, 1.0] to Int16 PCM bytes
-                const pcmBuffer = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]));
-                    pcmBuffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                // Interleaved 2-channel 16-bit PCM (Left = Manager, Right = Customer)
+                const pcmBuffer = new Int16Array(leftChannel.length * 2);
+                for (let i = 0; i < leftChannel.length; i++) {
+                    const sL = Math.max(-1, Math.min(1, leftChannel[i]));
+                    const sR = Math.max(-1, Math.min(1, rightChannel[i]));
+                    pcmBuffer[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+                    pcmBuffer[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
                 }
                 
-                // Stream combined mono binary PCM bytes to backend
+                // Stream 2-channel interleaved PCM bytes to backend
                 audioWs.send(pcmBuffer.buffer);
             };
-            
-            // Connect BOTH sources to the processor node to mix/sum them natively!
-            micSourceNode.connect(audioProcessor);
-            screenSourceNode.connect(audioProcessor);
             
             audioProcessor.connect(audioContext.destination);
         }
