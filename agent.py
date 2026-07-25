@@ -1,9 +1,16 @@
+import asyncio
 from enum import Enum
+import json
+import os
 from typing import List, Optional, AsyncGenerator, Dict, Any
+
+import httpx
 import pydantic
 import google.antigravity.types as t
 from google.antigravity import Agent, LocalAgentConfig
+
 import config
+
 
 class SPINStage(str, Enum):
     SITUATION = "Ситуация"
@@ -12,9 +19,11 @@ class SPINStage(str, Enum):
     NEED_PAYOFF = "Направляющие вопросы"
     OBJECTION = "Обработка возражений"
 
+
 class SpeakerRole(str, Enum):
     REPRESENTATIVE = "Representative"
     CUSTOMER = "Customer"
+
 
 class SalesHint(pydantic.BaseModel):
     suggested_scripts: List[str] = pydantic.Field(
@@ -27,7 +36,7 @@ class SalesHint(pydantic.BaseModel):
     )
     customer_transcript: str = pydantic.Field(
         default="",
-        description="ОБЯЗАТЕЛЬНАЯ точная дословная расшифровка произнесенной аудиореплики на русском языке (если тишина, указвать '')"
+        description="ОБЯЗАТЕЛЬНАЯ точная дословная расшифровка произнесенной аудиореплики на русском языке (если тишина, указывать '')"
     )
     speaker_role: SpeakerRole = pydantic.Field(
         default=SpeakerRole.REPRESENTATIVE,
@@ -46,22 +55,6 @@ class SalesHint(pydantic.BaseModel):
         description="Коэффициент уверенности классификации (от 0.0 до 1.0)"
     )
 
-import io
-import wave
-
-def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000, sample_width: int = 2) -> bytes:
-    wav_io = io.BytesIO()
-    with wave.open(wav_io, 'wb') as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm_bytes)
-    return wav_io.getvalue()
-
-import base64
-import json
-import os
-import httpx
 
 class SalesAgent:
     def __init__(self):
@@ -73,13 +66,6 @@ class SalesAgent:
             temperature=config.TEMPERATURE
         )
 
-    async def get_hint(self, conversation_transcript: str, new_audio_bytes: Optional[bytes] = None) -> Optional[dict]:
-        """
-        Sends the current conversation transcript and optional new audio bytes
-        to the Antigravity Agent, returning the structured SalesHint.
-        Supports MOCK_MODE to preserve API quota during local testing.
-        """
-        import asyncio
     async def _mock_hint(self, conversation_transcript: str) -> dict:
         transcript_lower = conversation_transcript.lower()
         if "кредит" in transcript_lower or "лимит" in transcript_lower or "карт" in transcript_lower:
@@ -151,7 +137,6 @@ class SalesAgent:
         Pure async HTTP SSE stream using httpx.AsyncClient for zero-latency token delivery.
         Text-only input for maximum speed (~300ms latency).
         """
-        import asyncio
         if config.MOCK_MODE:
             await asyncio.sleep(0.3)
             hint_dict = await self._mock_hint(conversation_transcript)
@@ -183,15 +168,7 @@ class SalesAgent:
                 "contents": [
                     {
                         "role": "user",
-                        "parts": [
-                            {"text": prompt},
-                            {
-                                "inlineData": {
-                                    "mimeType": "audio/wav",
-                                    "data": audio_b64
-                                }
-                            }
-                        ]
+                        "parts": [{"text": prompt}]
                     }
                 ],
                 "generationConfig": {
@@ -259,8 +236,8 @@ class SalesAgent:
                                 chunk_json = json.loads(json_data_str)
                                 candidates = chunk_json.get("candidates", [])
                                 if candidates:
-                                    parts = candidates[0].get("content", {}).get("parts", [])
-                                    for part in parts:
+                                    parts_res = candidates[0].get("content", {}).get("parts", [])
+                                    for part in parts_res:
                                         part_text = part.get("text", "")
                                         if part_text:
                                             full_text += part_text
@@ -275,15 +252,14 @@ class SalesAgent:
                 except Exception as e:
                     print(f"[SalesAgent] Stream JSON parse error: {e}")
         except Exception as e:
-            print(f"[SalesAgent] Multimodal async SSE streaming error: {e}")
+            print(f"[SalesAgent] Async SSE streaming error: {e}")
 
-    async def get_hint(self, conversation_transcript: str, new_audio_bytes: Optional[bytes] = None) -> Optional[dict]:
+    async def get_hint(self, conversation_transcript: str) -> Optional[dict]:
         """
-        Sends the current conversation transcript and optional new audio bytes
-        to the Agent, returning the structured SalesHint.
+        Sends the current conversation transcript to the Agent, returning the structured SalesHint.
         """
         final_data = None
-        async for item in self.get_hint_stream(conversation_transcript, new_audio_bytes):
+        async for item in self.get_hint_stream(conversation_transcript):
             if item["type"] == "final":
                 final_data = item["data"]
         return final_data

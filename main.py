@@ -1,15 +1,12 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
+import logging
 import os
 import subprocess
 import time
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
 from typing import Set, List, Dict, Optional
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import uvicorn
@@ -19,13 +16,19 @@ from agent import SalesAgent
 from vad import VADProcessor, extract_stereo_channels
 from stt import get_stt_processor
 
-app = FastAPI(title="Zoom Sales Copilot Backend")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, get_stt_processor)
     print("[SERVER] Sber GigaAM STT pre-loaded successfully into memory!")
+    yield
+
+app = FastAPI(title="Zoom Sales Copilot Backend", lifespan=lifespan)
 
 # Session state configuration for multi-session support
 class SessionState:
@@ -54,6 +57,27 @@ def get_session(session_id: str) -> SessionState:
         sessions[session_id] = SessionState(session_id)
     return sessions[session_id]
 
+def cleanup_session_if_empty(session_id: str):
+    """
+    Cleans up session memory if no UI/Audio clients are connected and bot process is inactive.
+    """
+    session = sessions.get(session_id)
+    if session and len(session.connected_clients) == 0 and (session.bot_process is None or session.bot_process.poll() is not None):
+        if session.speculative_task and not session.speculative_task.done():
+            session.speculative_task.cancel()
+        sessions.pop(session_id, None)
+        print(f"[{session_id}] Cleaned up empty session state from memory.")
+
+async def broadcast_to_session(session: SessionState, payload: dict):
+    """
+    Helper method to broadcast JSON messages to all connected UI WebSocket clients.
+    """
+    for client in list(session.connected_clients):
+        try:
+            await client.send_json(payload)
+        except Exception:
+            pass
+
 def is_duplicate_transcript(session: SessionState, text: str, role: str) -> bool:
     """
     Checks if the newly transcribed text matches the last line in the transcript buffer
@@ -77,7 +101,7 @@ def is_duplicate_transcript(session: SessionState, text: str, role: str) -> bool
 @app.get("/")
 async def get_index():
     """
-    Serves the floating UI index page (Option 1) directly.
+    Serves the floating UI index page directly.
     """
     index_path = os.path.join(os.path.dirname(__file__), "index.html")
     if os.path.exists(index_path):
@@ -116,6 +140,7 @@ async def client_websocket_endpoint(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         session.connected_clients.remove(websocket)
         print(f"[{session_id}] Frontend UI client disconnected. Total clients in session: {len(session.connected_clients)}")
+        cleanup_session_if_empty(session_id)
 
 async def run_speculative_query(session_id: str, transcript_text: str):
     """
@@ -134,21 +159,13 @@ async def run_speculative_query(session_id: str, transcript_text: str):
                     "text": item["text"],
                     "full_text": item["full_text"]
                 }
-                for client in list(session.connected_clients):
-                    try:
-                        await client.send_json(payload_chunk)
-                    except Exception:
-                        pass
+                await broadcast_to_session(session, payload_chunk)
             if item["type"] == "error":
                 payload_err = {
                     "type": "rate_limit_error",
                     "message": item.get("message", "Слишком много запросов")
                 }
-                for client in list(session.connected_clients):
-                    try:
-                        await client.send_json(payload_err)
-                    except Exception:
-                        pass
+                await broadcast_to_session(session, payload_err)
                 return
             elif item["type"] == "final":
                 hint_data = item["data"]
@@ -156,14 +173,12 @@ async def run_speculative_query(session_id: str, transcript_text: str):
         if hint_data:
             session.current_hint = hint_data
             
-            # Extract values from Gemini multimodal response (Gemini determines speaker role semantically)
             transcription = hint_data.get("customer_transcript")
             role = hint_data.get("speaker_role") or "Representative"
             
             if transcription and transcription.strip():
                 clean_text = transcription.strip()
                 if not is_duplicate_transcript(session, clean_text, role):
-                    # Format and add to transcript history
                     display_speaker = "Менеджер" if role == "Representative" else "Клиент"
                     line = f"{display_speaker}: {clean_text}"
                     session.transcript_buffer.append(line)
@@ -176,13 +191,8 @@ async def run_speculative_query(session_id: str, transcript_text: str):
                         "line": line,
                         "transcript": "\n".join(session.transcript_buffer)
                     }
-                    for client in list(session.connected_clients):
-                        try:
-                            await client.send_json(payload_trans)
-                        except Exception:
-                            pass
+                    await broadcast_to_session(session, payload_trans)
 
-            # Broadcast hint details to UI (if Representative, suppress_display flag is added)
             payload_hint = {
                 "type": "hint",
                 "data": session.current_hint,
@@ -193,11 +203,7 @@ async def run_speculative_query(session_id: str, transcript_text: str):
             else:
                 print(f"[{session_id}] [SPECOPS] Representative turn finished. Suppressing UI hint card update.")
                 
-            for client in list(session.connected_clients):
-                try:
-                    await client.send_json(payload_hint)
-                except Exception:
-                    pass
+            await broadcast_to_session(session, payload_hint)
                 
     except asyncio.CancelledError:
         print(f"[{session_id}] [SPECOPS] Speculative query was CANCELLED due to speech resumption.")
@@ -214,34 +220,27 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
     session = get_session(session_id)
     print(f"[{session_id}] Audio streaming source connected.")
     
-    # Broadcast connection success to UI clients
     payload_init = {
         "type": "bot_status",
         "connected": True,
         "message": "Бот успешно подключился к аудиопотоку встречи!"
     }
-    for client in list(session.connected_clients):
-        try:
-            await client.send_json(payload_init)
-        except Exception:
-            pass
+    await broadcast_to_session(session, payload_init)
             
     vad_processor = VADProcessor(
         sample_rate=config.SAMPLE_RATE,
         frame_duration_ms=config.FRAME_DURATION_MS,
-        energy_threshold=650.0  # Filter out Mac/WebAudio background hiss (400-600 RMS)
+        energy_threshold=650.0
     )
     
     try:
         while True:
-            # Receive binary (PCM chunks) or text (transcript events)
             message = await websocket.receive()
             
             if "bytes" in message:
                 raw_bytes = message["bytes"]
                 left_bytes, right_bytes, left_rms, right_rms = extract_stereo_channels(raw_bytes)
                 
-                # Deterministic Speaker Identification: Left = Manager, Right = Customer
                 if left_rms >= 600.0 and left_rms >= right_rms:
                     audio_chunk = left_bytes
                     session.last_speaker = "Representative"
@@ -253,40 +252,30 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                     
                 vad_result = vad_processor.process_chunk(audio_chunk)
                 
-                # Logic: Speech Resumed
                 if vad_result["speech_started"]:
                     session.rate_limit_skipped = False
-                    session.audio_buffer.clear()  # Clear for fresh speech capture
+                    session.audio_buffer.clear()
                 
-                # Logic: Accumulate Audio during speech
                 if vad_result["is_speaking"]:
                     session.audio_buffer.extend(audio_chunk)
                 
-                # Logic: Silence Duration limits
                 if not vad_result["is_speaking"]:
                     silence_ms = vad_result["silence_duration_ms"]
                     
-                    # Trigger Speculative Task
                     if silence_ms >= config.SPECULATIVE_SILENCE_LIMIT_MS:
-                        # Make sure we have at least 0.5s of recorded audio (8000 samples = 16000 bytes)
                         if len(session.audio_buffer) >= 16000 and (session.speculative_task is None or session.speculative_task.done()):
                             now = time.time()
-                            # Fetch and clear accumulated audio bytes
                             audio_data = bytes(session.audio_buffer)
                             session.audio_buffer.clear()
                             
-                            # Double-check audio energy to ensure real speech exists (not empty background hiss)
                             audio_energy = vad_processor.calculate_energy(audio_data)
                             if audio_energy < 600.0:
-                                # Discard empty background noise buffer without firing API query
                                 continue
                                 
-                            # 0.05 seconds cooldown (instant local STT mode)
                             if now - session.last_query_time >= 0.05:
                                 session.last_query_time = now
                                 session.rate_limit_skipped = False
                                 
-                                # Stage 1: Instant Local Sber GigaAM STT in RAM (~20ms)
                                 try:
                                     stt_processor = get_stt_processor()
                                     loop = asyncio.get_running_loop()
@@ -295,7 +284,6 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                     stt_elapsed_ms = (time.time() - stt_start) * 1000
                                     
                                     if stt_text and stt_text.strip():
-                                        # New speech decoded! Cancel any pending/running Gemini query task
                                         if session.speculative_task and not session.speculative_task.done():
                                             session.speculative_task.cancel()
                                             print(f"[{session_id}] [VAD] New speech decoded! Cancelled pending Gemini query.")
@@ -309,21 +297,15 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                             session.pending_gemini_query = True
                                             print(f"[{session_id}] [LOCAL-STT ⚡ {stt_elapsed_ms:.0f}ms] {line}")
                                             
-                                            # Broadcast INSTANT transcript line to UI feed (<20ms!)
                                             payload_trans = {
                                                 "type": "transcript_update",
                                                 "line": line,
                                                 "transcript": "\n".join(session.transcript_buffer)
                                             }
-                                            for client in list(session.connected_clients):
-                                                try:
-                                                    await client.send_json(payload_trans)
-                                                except Exception:
-                                                    pass
+                                            await broadcast_to_session(session, payload_trans)
                                 except Exception as stt_err:
                                     print(f"[{session_id}] Local STT execution error: {stt_err}")
 
-                                # Stage 2: Gemini Sales Agent (Only trigger on 380ms pause if speaker has NOT resumed speech and new speech is pending)
                                 if not vad_result["is_speaking"] and silence_ms >= config.FINAL_SILENCE_LIMIT_MS:
                                     if session.pending_gemini_query and session.transcript_buffer:
                                         session.pending_gemini_query = False
@@ -335,7 +317,7 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                             else:
                                 if not session.rate_limit_skipped:
                                     session.rate_limit_skipped = True
-                                    print(f"[{session_id}] [VAD] Silence reached, but API query rate-limited to protect Free Tier (cooldown: {2.5 - (now - session.last_query_time):.1f}s).")
+                                    print(f"[{session_id}] [VAD] Silence reached, but API query rate-limited to protect Free Tier.")
                             
             elif "text" in message:
                 data = json.loads(message["text"])
@@ -344,44 +326,32 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                     text = data.get("text", "").strip()
                     
                     if text and not is_duplicate_transcript(session, text, speaker):
-                        # Track last speaker
                         session.last_speaker = speaker
-                        
-                        # Localize speaker names to Russian for UI (Default PC audio is Менеджер)
                         display_speaker = "Менеджер" if speaker == "Representative" else "Клиент"
                         line = f"{display_speaker}: {text}"
                         session.transcript_buffer.append(line)
                         session.pending_gemini_query = True
                         print(f"\n[{session_id}] [STT] {line}")
                         
-                        # Also broadcast transcript update to UI
                         payload = {
                             "type": "transcript_update",
                             "line": line,
                             "transcript": "\n".join(session.transcript_buffer)
                         }
-                        for client in list(session.connected_clients):
-                            try:
-                                await client.send_json(payload)
-                            except Exception:
-                                pass
+                        await broadcast_to_session(session, payload)
                             
     except WebSocketDisconnect:
         print(f"[{session_id}] Audio streaming source disconnected.")
     except Exception as e:
         print(f"[{session_id}] Error in audio stream connection for session {session_id}: {e}")
     finally:
-        # Broadcast disconnection to UI clients
         payload_disc = {
             "type": "bot_status",
             "connected": False,
             "message": "Бот отключился от трансляции аудио."
         }
-        for client in list(session.connected_clients):
-            try:
-                await client.send_json(payload_disc)
-            except Exception:
-                pass
+        await broadcast_to_session(session, payload_disc)
+        cleanup_session_if_empty(session_id)
 
 @app.post("/bot/start")
 async def start_bot(data: dict):
@@ -454,12 +424,12 @@ async def stop_bot(data: dict):
             session.bot_process = None
             
     if stopped:
+        cleanup_session_if_empty(session_id)
         return {"status": "success", "message": "Zoom Bot stopped successfully"}
     else:
         return {"status": "error", "message": "No active bot found to stop"}
 
 if __name__ == "__main__":
-    # Load port from env
     port = int(os.environ.get("PORT", 8000))
     print(f"Starting Zoom Sales Copilot Server on http://localhost:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)

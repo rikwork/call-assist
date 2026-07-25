@@ -144,7 +144,7 @@ Thumbs.db
 # Node.js dependencies
 node_modules/
 zoom_bot/node_modules/
+*.png
 
 # Agent Workspaces
 .agent/workspaces/
-

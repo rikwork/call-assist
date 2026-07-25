@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import struct
+import sys
 import websockets
 
 # Dialogue list to simulate a sales call (Localized to Russian)
@@ -64,8 +65,6 @@ def generate_silence_chunk(duration_ms: int = 30, sample_rate: int = 16000) -> b
     """
     num_samples = int(sample_rate * (duration_ms / 1000.0))
     return struct.pack(f"<{num_samples}h", *[0] * num_samples)
-
-import sys
 
 async def stream_audio():
     session_id = sys.argv[1] if len(sys.argv) > 1 else "default_session"
