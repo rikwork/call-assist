@@ -50,10 +50,6 @@ class SalesHint(pydantic.BaseModel):
         default=[],
         description="Список конкретных возражений клиента (например: Цена / Бюджет, Конкуренты, Сроки)"
     )
-    confidence: float = pydantic.Field(
-        default=1.0,
-        description="Коэффициент уверенности классификации (от 0.0 до 1.0)"
-    )
 
 
 class SalesAgent:
@@ -79,7 +75,6 @@ class SalesAgent:
                     "Подсказать, как зафиксировать одобренный лимит прямо сейчас?",
                     "Пользуетесь ли вы кредитной картой для выгодного кэшбэка?"
                 ],
-                "confidence": 0.95,
                 "customer_transcript": "А какие условия по вашей кредитной карте?",
                 "speaker_role": "Customer"
             }
@@ -94,7 +89,6 @@ class SalesAgent:
                     "Хотите подключим брокерский счет за 1 минуту прямо к приложению?",
                     "Рассматривали ли вы вариант получать доход от свободного остатка на счете?"
                 ],
-                "confidence": 0.92,
                 "customer_transcript": "Инвестициями я тоже немного интересовался.",
                 "speaker_role": "Customer"
             }
@@ -109,7 +103,6 @@ class SalesAgent:
                     "Бывают ли ситуации, когда важно иметь под рукой средства до зарплаты?",
                     "Если карта бесплатная, удобнее активировать ее сейчас вместе с курьером?"
                 ],
-                "confidence": 0.90,
                 "customer_transcript": "Спасибо, но мне пока нужна только дебетовая карта.",
                 "speaker_role": "Customer"
             }
@@ -124,7 +117,6 @@ class SalesAgent:
                     "Удобно ли вам получить дебетовую карту завтра курьером?",
                     "Подсказать, как зафиксировать одобренную кредитную карту с 365 днями без % и получить акции в подарок?"
                 ],
-                "confidence": 0.95,
                 "customer_transcript": "Здравствуйте! Да, я оставлял заявку на дебетовую карту.",
                 "speaker_role": "Customer"
             }
@@ -205,10 +197,6 @@ class SalesAgent:
                                 "type": "ARRAY",
                                 "items": {"type": "STRING"},
                                 "description": "Список конкретных возражений клиента"
-                            },
-                            "confidence": {
-                                "type": "NUMBER",
-                                "description": "Коэффициент уверенности классификации"
                             }
                         },
                         "required": ["suggested_scripts", "next_questions", "customer_transcript", "speaker_role", "stage"]

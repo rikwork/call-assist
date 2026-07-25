@@ -16,9 +16,7 @@ class TestSalesAgent(unittest.TestCase):
             next_questions=["Удобно ли общаться?"],
             customer_transcript="Да, удобнее.",
             speaker_role=SpeakerRole.CUSTOMER,
-            stage=SPINStage.SITUATION,
-            detected_objections=[],
-            confidence=0.95
+            detected_objections=[]
         )
         self.assertEqual(hint.speaker_role, "Customer")
         self.assertEqual(hint.stage, "Ситуация")

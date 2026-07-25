@@ -338,16 +338,6 @@
             100% { box-shadow: 0 0 12px 2px rgba(244, 63, 94, 0.35); }
         }
 
-        .confidence-label {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
-
-        .confidence-value {
-            color: var(--text-secondary);
-            font-weight: 600;
-        }
 
         /* Objections Section */
         .objections-list {
@@ -573,16 +563,7 @@
                 <div class="panel-title">
                     <span>💡 Подсказки ИИ-копилота</span>
                 </div>
-                <div class="status-badge" id="thinking-badge" style="display: none;">
-                    <div class="wave-wrapper">
-                        <div class="wave-bar"></div>
-                        <div class="wave-bar"></div>
-                        <div class="wave-bar"></div>
-                        <div class="wave-bar"></div>
-                        <div class="wave-bar"></div>
-                    </div>
-                    <span>Анализирую речь...</span>
-                </div>
+
             </div>
             
             <div class="hints-container" id="hints-feed">
@@ -600,9 +581,6 @@
                 <div class="hint-card" id="active-hint-card" style="display: none;">
                     <div class="stage-badge-container">
                         <div class="stage-badge" id="hint-stage">Ситуация</div>
-                        <div class="confidence-label">
-                            Точность: <span class="confidence-value" id="hint-confidence">98%</span>
-                        </div>
                     </div>
                     
                     <div id="objections-container" style="display: none;">
@@ -647,12 +625,10 @@
         const statusText = document.getElementById('status-text');
         const connBadge = document.getElementById('conn-badge');
         const transcriptFeed = document.getElementById('transcript-feed');
-        const thinkingBadge = document.getElementById('thinking-badge');
         
         const welcomeHint = document.getElementById('welcome-hint');
         const activeHintCard = document.getElementById('active-hint-card');
         const hintStage = document.getElementById('hint-stage');
-        const hintConfidence = document.getElementById('hint-confidence');
         const objectionsContainer = document.getElementById('objections-container');
         const objectionsPills = document.getElementById('objections-pills');
         const hintScript = document.getElementById('hint-script');
@@ -707,17 +683,9 @@
                 
                 if (message.type === 'transcript_update') {
                     addTranscriptLine(message.line);
-                    // Show processing animation
-                    thinkingBadge.style.display = 'flex';
-                    const span = thinkingBadge.querySelector('span');
-                    if (span) span.textContent = 'Анализирую речь...';
                 }
                 
                 if (message.type === 'stream_chunk') {
-                    thinkingBadge.style.display = 'flex';
-                    const span = thinkingBadge.querySelector('span');
-                    if (span) span.textContent = '⚡ Печатает подсказку ИИ...';
-                    
                     if (message.full_text) {
                         const partialData = parsePartialJson(message.full_text);
                         updateHint(partialData, true);
@@ -725,13 +693,10 @@
                 }
                 
                 if (message.type === 'hint') {
-                    // Hide thinking badge
-                    thinkingBadge.style.display = 'none';
                     updateHint(message.data, false);
                 }
                 
                 if (message.type === 'rate_limit_error') {
-                    thinkingBadge.style.display = 'none';
                     const banner = document.getElementById('rate-limit-banner');
                     if (banner) {
                         banner.style.display = 'flex';
@@ -749,7 +714,6 @@
                 suggested_scripts: [],
                 next_questions: [],
                 detected_objections: [],
-                confidence: 1.0,
                 speaker_role: 'Customer'
             };
             if (!jsonStr) return result;
@@ -832,9 +796,6 @@
             else if (stage.includes('Направляющие')) hintStage.classList.add('need-payoff');
             else if (stage.includes('возражений')) hintStage.classList.add('objection');
             
-            // Confidence
-            const conf = Math.round((data.confidence || 1.0) * 100);
-            hintConfidence.textContent = `${conf}%`;
             
             // Handle objections lists with secure DOM creation
             const objections = data.detected_objections || [];
