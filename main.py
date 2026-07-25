@@ -40,6 +40,7 @@ class SessionState:
         self.last_speaker: Optional[str] = None
         self.bot_process: Optional[subprocess.Popen] = None
         self.audio_buffer: bytearray = bytearray()
+        self.pending_gemini_query: bool = False
 
 # Global sessions tracker
 sessions: Dict[str, SessionState] = {}
@@ -267,8 +268,8 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                     
                     # Trigger Speculative Task
                     if silence_ms >= config.SPECULATIVE_SILENCE_LIMIT_MS:
-                        # Make sure we have at least 0.5s of recorded audio (8000 samples)
-                        if len(session.audio_buffer) >= 8000 and (session.speculative_task is None or session.speculative_task.done()):
+                        # Make sure we have at least 0.5s of recorded audio (8000 samples = 16000 bytes)
+                        if len(session.audio_buffer) >= 16000 and (session.speculative_task is None or session.speculative_task.done()):
                             now = time.time()
                             # Fetch and clear accumulated audio bytes
                             audio_data = bytes(session.audio_buffer)
@@ -289,7 +290,9 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                 try:
                                     stt_processor = get_stt_processor()
                                     loop = asyncio.get_running_loop()
+                                    stt_start = time.time()
                                     stt_text = await loop.run_in_executor(None, stt_processor.transcribe, audio_data)
+                                    stt_elapsed_ms = (time.time() - stt_start) * 1000
                                     
                                     if stt_text and stt_text.strip():
                                         # New speech decoded! Cancel any pending/running Gemini query task
@@ -303,7 +306,8 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                             display_speaker = "Менеджер" if role == "Representative" else "Клиент"
                                             line = f"{display_speaker}: {clean_text}"
                                             session.transcript_buffer.append(line)
-                                            print(f"[{session_id}] [LOCAL-STT ⚡ 180ms] {line}")
+                                            session.pending_gemini_query = True
+                                            print(f"[{session_id}] [LOCAL-STT ⚡ {stt_elapsed_ms:.0f}ms] {line}")
                                             
                                             # Broadcast INSTANT transcript line to UI feed (<20ms!)
                                             payload_trans = {
@@ -319,13 +323,15 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                 except Exception as stt_err:
                                     print(f"[{session_id}] Local STT execution error: {stt_err}")
 
-                                # Stage 2: Gemini Sales Agent (Only trigger on 380ms pause if speaker has NOT resumed speech)
+                                # Stage 2: Gemini Sales Agent (Only trigger on 380ms pause if speaker has NOT resumed speech and new speech is pending)
                                 if not vad_result["is_speaking"] and silence_ms >= config.FINAL_SILENCE_LIMIT_MS:
-                                    transcript_text = "\n".join(session.transcript_buffer)
-                                    session.speculative_task = asyncio.create_task(
-                                        run_speculative_query(session_id, transcript_text)
-                                    )
-                                    print(f"[{session_id}] [VAD] Speech pause confirmed ({silence_ms}ms). Triggered SPIN query.")
+                                    if session.pending_gemini_query and session.transcript_buffer:
+                                        session.pending_gemini_query = False
+                                        transcript_text = "\n".join(session.transcript_buffer)
+                                        session.speculative_task = asyncio.create_task(
+                                            run_speculative_query(session_id, transcript_text)
+                                        )
+                                        print(f"[{session_id}] [VAD] Speech pause confirmed ({silence_ms}ms). Triggered SPIN query.")
                             else:
                                 if not session.rate_limit_skipped:
                                     session.rate_limit_skipped = True
@@ -337,7 +343,7 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                     speaker = data.get("speaker") or "Representative"
                     text = data.get("text", "").strip()
                     
-                    if text and not is_duplicate_transcript(session, text):
+                    if text and not is_duplicate_transcript(session, text, speaker):
                         # Track last speaker
                         session.last_speaker = speaker
                         
@@ -345,6 +351,7 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                         display_speaker = "Менеджер" if speaker == "Representative" else "Клиент"
                         line = f"{display_speaker}: {text}"
                         session.transcript_buffer.append(line)
+                        session.pending_gemini_query = True
                         print(f"\n[{session_id}] [STT] {line}")
                         
                         # Also broadcast transcript update to UI

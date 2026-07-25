@@ -1,4 +1,5 @@
 import os
+import threading
 import torch
 from typing import Optional
 
@@ -13,6 +14,7 @@ class GigaAMProcessor:
         if gigaam is None:
             raise ImportError("gigaam package is not installed.")
         self.model = gigaam.load_model(model_name)
+        self._lock = threading.Lock()
         print(f"[STT] Sber GigaAM '{model_name}' in-memory decoder loaded successfully!")
 
     @torch.inference_mode()
@@ -25,14 +27,15 @@ class GigaAMProcessor:
             return ""
         
         try:
-            # Convert raw 16-bit PCM bytes directly into float32 Tensor normalized in [-1.0, 1.0]
-            wav_tensor = torch.frombuffer(bytearray(pcm_bytes), dtype=torch.int16).float() / 32768.0
-            wav = wav_tensor.to(self.model._device).to(self.model._dtype).unsqueeze(0)
-            length = torch.full([1], wav.shape[-1], device=self.model._device)
+            with self._lock:
+                # Convert raw 16-bit PCM bytes directly into float32 Tensor normalized in [-1.0, 1.0]
+                wav_tensor = torch.frombuffer(pcm_bytes, dtype=torch.int16).float() / 32768.0
+                wav = wav_tensor.to(self.model._device).to(self.model._dtype).unsqueeze(0)
+                length = torch.full([1], wav.shape[-1], device=self.model._device)
 
-            # Direct in-memory forward pass & CTC decode
-            encoded, encoded_len = self.model.forward(wav, length)
-            decoded = self.model.decoding.decode(self.model.head, encoded, encoded_len)
+                # Direct in-memory forward pass & CTC decode
+                encoded, encoded_len = self.model.forward(wav, length)
+                decoded = self.model.decoding.decode(self.model.head, encoded, encoded_len)
             
             if decoded and len(decoded) > 0:
                 text = str(decoded[0]).strip()

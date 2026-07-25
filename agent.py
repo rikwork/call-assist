@@ -1,8 +1,6 @@
 from enum import Enum
 from typing import List, Optional, AsyncGenerator, Dict, Any
 import pydantic
-from google import genai
-from google.genai import types
 import google.antigravity.types as t
 from google.antigravity import Agent, LocalAgentConfig
 import config

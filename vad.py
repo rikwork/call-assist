@@ -16,9 +16,10 @@ def extract_stereo_channels(chunk_bytes: bytes) -> tuple[bytes, bytes, float, fl
     if num_samples == 0:
         return chunk_bytes, chunk_bytes, 0.0, 0.0
         
+    aligned_bytes = chunk_bytes[:num_samples * 4]
     fmt = f"<{num_samples * 2}h"
     try:
-        samples = struct.unpack(fmt, chunk_bytes)
+        samples = struct.unpack(fmt, aligned_bytes)
     except Exception:
         return chunk_bytes, chunk_bytes, 0.0, 0.0
         
