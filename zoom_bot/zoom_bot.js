@@ -30,7 +30,7 @@ if (!zoomUrl) {
 
 // Format WS URI
 const wsProtocol = backendHost.includes('localhost') ? 'ws' : 'wss';
-const wsUri = `${wsProtocol}://${backendHost}/audio/${sessionId}`;
+const wsUri = `${wsProtocol}://${backendHost}/audio/${sessionId}?source=bot`;
 
 console.log(`[Zoom Bot] Target Session: ${sessionId}`);
 console.log(`[Zoom Bot] Target Zoom URL: ${zoomUrl}`);

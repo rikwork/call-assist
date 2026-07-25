@@ -41,6 +41,8 @@ class SessionState:
         self.last_query_time: float = 0.0
         self.rate_limit_skipped: bool = False
         self.last_speaker: Optional[str] = None
+        self.active_channel: Optional[str] = None
+        self.last_manager_speech_time: float = 0.0
         self.bot_process: Optional[subprocess.Popen] = None
         self.audio_buffer: bytearray = bytearray()
         self.pending_gemini_query: bool = False
@@ -83,19 +85,24 @@ def is_duplicate_transcript(session: SessionState, text: str, role: str) -> bool
     Checks if the newly transcribed text matches the last line in the transcript buffer
     from the SAME speaker to prevent repeating accidental VAD duplicates.
     """
-    clean_text = text.strip()
-    if not clean_text:
+    clean_text = text.strip().lower()
+    if not clean_text or len(clean_text) < 2:
         return True
     if not session.transcript_buffer:
         return False
     
+    clean_words = clean_text.translate(str.maketrans('', '', '.,!?'))
+    
     last_line = session.transcript_buffer[-1]
     parts = last_line.split(": ", 1)
     if len(parts) == 2:
-        last_sender, last_text = parts[0].strip(), parts[1].strip()
+        prev_sender, prev_text = parts[0].strip(), parts[1].strip().lower()
+        prev_words = prev_text.translate(str.maketrans('', '', '.,!?'))
         current_sender = "Менеджер" if role == "Representative" else "Клиент"
-        if last_sender == current_sender and last_text.lower() == clean_text.lower():
+        
+        if prev_sender == current_sender and clean_words == prev_words:
             return True
+            
     return False
 
 @app.get("/")
@@ -172,37 +179,12 @@ async def run_speculative_query(session_id: str, transcript_text: str):
 
         if hint_data:
             session.current_hint = hint_data
-            
-            transcription = hint_data.get("customer_transcript")
-            role = hint_data.get("speaker_role") or "Representative"
-            
-            if transcription and transcription.strip():
-                clean_text = transcription.strip()
-                if not is_duplicate_transcript(session, clean_text, role):
-                    display_speaker = "Менеджер" if role == "Representative" else "Клиент"
-                    line = f"{display_speaker}: {clean_text}"
-                    session.transcript_buffer.append(line)
-                    session.last_speaker = role
-                    print(f"[{session_id}] [SPECOPS-STT] {line}")
-                    
-                    # Broadcast transcript update to UI
-                    payload_trans = {
-                        "type": "transcript_update",
-                        "line": line,
-                        "transcript": "\n".join(session.transcript_buffer)
-                    }
-                    await broadcast_to_session(session, payload_trans)
-
             payload_hint = {
                 "type": "hint",
                 "data": session.current_hint,
                 "transcript": "\n".join(session.transcript_buffer)
             }
-            if role == "Customer":
-                print(f"[{session_id}] [SPECOPS] Hint generated for Customer: {json.dumps(session.current_hint, ensure_ascii=False)}")
-            else:
-                print(f"[{session_id}] [SPECOPS] Representative turn finished. Suppressing UI hint card update.")
-                
+            print(f"[{session_id}] [SPECOPS] Hint generated for transcript")
             await broadcast_to_session(session, payload_hint)
                 
     except asyncio.CancelledError:
@@ -212,20 +194,21 @@ async def run_speculative_query(session_id: str, transcript_text: str):
         print(f"[{session_id}] [SPECOPS] Error running query: {e}")
 
 @app.websocket("/audio/{session_id}")
-async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
+async def audio_stream_endpoint(websocket: WebSocket, session_id: str, source: str = "browser"):
     """
     WebSocket endpoint that receives audio stream chunks and STT transcript events for a specific session.
     """
     await websocket.accept()
     session = get_session(session_id)
-    print(f"[{session_id}] Audio streaming source connected.")
+    print(f"[{session_id}] Audio streaming source ({source}) connected.")
     
-    payload_init = {
-        "type": "bot_status",
-        "connected": True,
-        "message": "Бот успешно подключился к аудиопотоку встречи!"
-    }
-    await broadcast_to_session(session, payload_init)
+    if source == "bot":
+        payload_init = {
+            "type": "bot_status",
+            "connected": True,
+            "message": "Бот успешно подключился к аудиопотоку встречи!"
+        }
+        await broadcast_to_session(session, payload_init)
             
     vad_processor = VADProcessor(
         sample_rate=config.SAMPLE_RATE,
@@ -241,35 +224,42 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                 raw_bytes = message["bytes"]
                 left_bytes, right_bytes, left_rms, right_rms = extract_stereo_channels(raw_bytes)
                 
-                if left_rms >= 600.0 and left_rms >= right_rms:
-                    audio_chunk = left_bytes
-                    session.last_speaker = "Representative"
-                elif right_rms >= 600.0:
-                    audio_chunk = right_bytes
-                    session.last_speaker = "Customer"
+                threshold = 500.0
+                if right_rms >= threshold and right_rms >= left_rms * 0.8:
+                    current_speaker = "Customer"
+                    current_channel = "right"
+                elif left_rms >= threshold:
+                    current_speaker = "Representative"
+                    current_channel = "left"
                 else:
-                    audio_chunk = left_bytes
-                    
+                    current_channel = session.active_channel or "left"
+                    current_speaker = "Representative" if current_channel == "left" else "Customer"
+                
+                audio_chunk = left_bytes if current_channel == "left" else right_bytes
                 vad_result = vad_processor.process_chunk(audio_chunk)
                 
                 if vad_result["speech_started"]:
+                    session.active_channel = current_channel
+                    session.last_speaker = current_speaker
                     session.rate_limit_skipped = False
                     session.audio_buffer.clear()
                 
                 if vad_result["is_speaking"]:
-                    session.audio_buffer.extend(audio_chunk)
+                    active_bytes = left_bytes if (session.active_channel or current_channel) == "left" else right_bytes
+                    session.audio_buffer.extend(active_bytes)
                 
                 if not vad_result["is_speaking"]:
                     silence_ms = vad_result["silence_duration_ms"]
                     
                     if silence_ms >= config.SPECULATIVE_SILENCE_LIMIT_MS:
-                        if len(session.audio_buffer) >= 16000 and (session.speculative_task is None or session.speculative_task.done()):
+                        if len(session.audio_buffer) >= 4800 and (session.speculative_task is None or session.speculative_task.done()):
                             now = time.time()
                             audio_data = bytes(session.audio_buffer)
                             session.audio_buffer.clear()
                             
                             audio_energy = vad_processor.calculate_energy(audio_data)
                             if audio_energy < 600.0:
+                                session.active_channel = None
                                 continue
                                 
                             if now - session.last_query_time >= 0.05:
@@ -294,7 +284,8 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                             display_speaker = "Менеджер" if role == "Representative" else "Клиент"
                                             line = f"{display_speaker}: {clean_text}"
                                             session.transcript_buffer.append(line)
-                                            session.pending_gemini_query = True
+                                            if role == "Customer":
+                                                session.pending_gemini_query = True
                                             print(f"[{session_id}] [LOCAL-STT ⚡ {stt_elapsed_ms:.0f}ms] {line}")
                                             
                                             payload_trans = {
@@ -306,15 +297,22 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                                 except Exception as stt_err:
                                     print(f"[{session_id}] Local STT execution error: {stt_err}")
 
+                                current_speaker_role = session.last_speaker
+                                session.active_channel = None
+
                                 if not vad_result["is_speaking"] and silence_ms >= config.FINAL_SILENCE_LIMIT_MS:
                                     if session.pending_gemini_query and session.transcript_buffer:
                                         session.pending_gemini_query = False
-                                        transcript_text = "\n".join(session.transcript_buffer)
-                                        session.speculative_task = asyncio.create_task(
-                                            run_speculative_query(session_id, transcript_text)
-                                        )
-                                        print(f"[{session_id}] [VAD] Speech pause confirmed ({silence_ms}ms). Triggered SPIN query.")
+                                        if current_speaker_role == "Customer":
+                                            transcript_text = "\n".join(session.transcript_buffer)
+                                            session.speculative_task = asyncio.create_task(
+                                                run_speculative_query(session_id, transcript_text)
+                                            )
+                                            print(f"[{session_id}] [VAD] Customer speech pause confirmed ({silence_ms}ms). Triggered SPIN query.")
+                                        else:
+                                            print(f"[{session_id}] [VAD] Representative turn finished ({silence_ms}ms). Suppressing Gemini query.")
                             else:
+                                session.active_channel = None
                                 if not session.rate_limit_skipped:
                                     session.rate_limit_skipped = True
                                     print(f"[{session_id}] [VAD] Silence reached, but API query rate-limited to protect Free Tier.")
@@ -330,7 +328,6 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                         display_speaker = "Менеджер" if speaker == "Representative" else "Клиент"
                         line = f"{display_speaker}: {text}"
                         session.transcript_buffer.append(line)
-                        session.pending_gemini_query = True
                         print(f"\n[{session_id}] [STT] {line}")
                         
                         payload = {
@@ -339,18 +336,25 @@ async def audio_stream_endpoint(websocket: WebSocket, session_id: str):
                             "transcript": "\n".join(session.transcript_buffer)
                         }
                         await broadcast_to_session(session, payload)
+
+                        if speaker == "Customer":
+                            transcript_text = "\n".join(session.transcript_buffer)
+                            session.speculative_task = asyncio.create_task(
+                                run_speculative_query(session_id, transcript_text)
+                            )
                             
     except WebSocketDisconnect:
         print(f"[{session_id}] Audio streaming source disconnected.")
     except Exception as e:
         print(f"[{session_id}] Error in audio stream connection for session {session_id}: {e}")
     finally:
-        payload_disc = {
-            "type": "bot_status",
-            "connected": False,
-            "message": "Бот отключился от трансляции аудио."
-        }
-        await broadcast_to_session(session, payload_disc)
+        if source == "bot":
+            payload_disc = {
+                "type": "bot_status",
+                "connected": False,
+                "message": "Бот отключился от трансляции аудио."
+            }
+            await broadcast_to_session(session, payload_disc)
         cleanup_session_if_empty(session_id)
 
 @app.post("/bot/start")
